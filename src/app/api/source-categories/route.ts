@@ -14,6 +14,16 @@ import { SearchResult } from '@/lib/types';
 export const runtime = 'nodejs';
 
 const BDZY_SOURCE_KEY = 'bdzy';
+const BDZY_TIMEOUT_MS = 10_000;
+const BDZY_MAX_ATTEMPTS = 2;
+const BDZY_HEADERS = {
+  Accept: 'application/json, text/plain, */*',
+  'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+  'User-Agent':
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+};
+const RETRIABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
+
 interface BdzyVideo {
   vod_id: number | string;
   vod_name: string;
@@ -46,6 +56,93 @@ function getEpisodes(playUrl?: string) {
     }
   }
   return { episodes, titles };
+}
+
+class BdzyRequestError extends Error {
+  constructor(
+    message: string,
+    readonly type: 'network' | 'timeout' | 'upstream',
+    readonly upstreamStatus?: number
+  ) {
+    super(message);
+    this.name = 'BdzyRequestError';
+  }
+}
+
+function delay(milliseconds: number) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function describeError(error: unknown) {
+  if (!(error instanceof Error)) return { value: String(error) };
+
+  const cause = (error as Error & { cause?: unknown }).cause;
+  return {
+    name: error.name,
+    message: error.message,
+    cause:
+      cause instanceof Error
+        ? { name: cause.name, message: cause.message }
+        : cause
+          ? String(cause)
+          : undefined,
+  };
+}
+
+async function fetchBdzy(url: URL): Promise<Response> {
+  for (let attempt = 1; attempt <= BDZY_MAX_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), BDZY_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: BDZY_HEADERS,
+        cache: 'no-store',
+      });
+
+      if (response.ok) return response;
+
+      const retryable = RETRIABLE_STATUS_CODES.has(response.status);
+      console.warn('[BDZY] Upstream returned a non-success response', {
+        attempt,
+        status: response.status,
+        statusText: response.statusText,
+        retryable,
+      });
+
+      if (!retryable || attempt === BDZY_MAX_ATTEMPTS) {
+        throw new BdzyRequestError(
+          `BDZY upstream returned HTTP ${response.status}`,
+          'upstream',
+          response.status
+        );
+      }
+    } catch (error) {
+      if (error instanceof BdzyRequestError) throw error;
+
+      const timedOut = error instanceof Error && error.name === 'AbortError';
+      console.error('[BDZY] Request from server failed', {
+        attempt,
+        timedOut,
+        ...describeError(error),
+      });
+
+      if (attempt === BDZY_MAX_ATTEMPTS) {
+        throw new BdzyRequestError(
+          timedOut ? 'BDZY request timed out' : 'BDZY network request failed',
+          timedOut ? 'timeout' : 'network'
+        );
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    // Chỉ retry một lần để tránh giữ function Netlify quá lâu khi nguồn lỗi.
+    await delay(350);
+  }
+
+  throw new BdzyRequestError('BDZY network request failed', 'network');
 }
 
 export async function GET(request: NextRequest) {
@@ -100,20 +197,9 @@ export async function GET(request: NextRequest) {
   // BDZY không hỗ trợ tham số lang, nhưng wd kết hợp với t=17 trả về đúng
   // danh sách Hồng Kông theo nhãn 粤语/国语 và vẫn có phân trang từ nguồn.
   if (language) url.searchParams.set('wd', language);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
 
   try {
-    const response = await fetch(url, {
-      signal: controller.signal,
-      headers: { Accept: 'application/json' },
-    });
-    if (!response.ok) {
-      return NextResponse.json(
-        { error: 'BDZY không phản hồi' },
-        { status: 502 }
-      );
-    }
+    const response = await fetchBdzy(url);
 
     const data = await response.json();
     if (!data || !Array.isArray(data.list)) {
@@ -157,12 +243,16 @@ export async function GET(request: NextRequest) {
       }
     );
   } catch (error) {
-    const message =
-      error instanceof Error && error.name === 'AbortError'
-        ? 'BDZY phản hồi quá chậm'
-        : 'Không thể tải danh mục BDZY';
+    const bdzyError = error instanceof BdzyRequestError ? error : null;
+    if (!bdzyError) {
+      console.error('[BDZY] Response could not be parsed', describeError(error));
+    }
+
+    const message = bdzyError?.type === 'timeout'
+      ? 'BDZY phản hồi quá chậm'
+      : bdzyError?.type === 'upstream'
+        ? `BDZY tạm từ chối yêu cầu (HTTP ${bdzyError.upstreamStatus})`
+        : 'Không thể kết nối đến BDZY từ máy chủ';
     return NextResponse.json({ error: message }, { status: 502 });
-  } finally {
-    clearTimeout(timeout);
   }
 }
