@@ -1,123 +1,287 @@
-'use client';
+"use client";
 
-import { ArrowLeft, ChevronLeft, ChevronRight, Home } from 'lucide-react';
-import { useRouter, useSearchParams } from 'next/navigation';
-import { useEffect, useMemo, useState } from 'react';
+import { ArrowLeft, Home, LoaderCircle } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import PageLayout from '@/components/PageLayout';
-import VideoCard from '@/components/VideoCard';
-import VideoCardSkeleton from '@/components/VideoCardSkeleton';
-import { SearchResult } from '@/lib/types';
+import PageLayout from "@/components/PageLayout";
+import { useSite } from "@/components/SiteProvider";
+import VideoCard from "@/components/VideoCard";
+import VideoCardSkeleton from "@/components/VideoCardSkeleton";
+import { SearchResult } from "@/lib/types";
 
 const CATEGORIES = {
-  series: '港澳剧',
-  movie: '港澳电影',
+  series: "港澳剧",
+  movie: "港澳电影",
 } as const;
+
+const MAX_EMPTY_BATCHES_PER_LOAD = 4;
+const STREAM_STATE_PREFIX = "joyflix-cantonese-stream";
 
 type CantoneseCategory = keyof typeof CATEGORIES;
 
-function getVisiblePages(currentPage: number, totalPages: number) {
-  if (totalPages <= 7) {
-    return Array.from({ length: totalPages }, (_, index) => index + 1);
+interface StreamCursor {
+  sourceIndex: number;
+  page: number;
+}
+
+interface StoredStreamState {
+  items: SearchResult[];
+  cursor: StreamCursor | null;
+  hasMore: boolean;
+  sourceCount: number;
+  sourceName: string;
+  sourcePage: number;
+}
+
+function normalizeTitle(title: string) {
+  return title
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/(?:粤语|国语|汉语普通话|普通话)(?:版)?/g, "")
+    .replace(/[\s·・:：,，.。'"“”‘’()（）\[\]【】{}<>《》_\-—–]/g, "");
+}
+
+function shouldReplaceCandidate(
+  current: SearchResult,
+  candidate: SearchResult
+) {
+  if (candidate.episodes.length !== current.episodes.length) {
+    return candidate.episodes.length > current.episodes.length;
   }
+  if (Boolean(candidate.poster) !== Boolean(current.poster)) {
+    return Boolean(candidate.poster);
+  }
+  return Boolean(candidate.desc) && !current.desc;
+}
 
-  const pages: Array<number | 'ellipsis'> = [1];
-  const start = Math.max(2, currentPage - 2);
-  const end = Math.min(totalPages - 1, currentPage + 2);
+function mergeUniqueItems(
+  currentItems: SearchResult[],
+  newItems: SearchResult[]
+) {
+  const uniqueItems = new Map<string, SearchResult>();
+  for (const item of [...currentItems, ...newItems]) {
+    const key = normalizeTitle(item.title);
+    const current = uniqueItems.get(key);
+    if (!current || shouldReplaceCandidate(current, item)) {
+      uniqueItems.set(key, item);
+    }
+  }
+  return Array.from(uniqueItems.values());
+}
 
-  if (start > 2) pages.push('ellipsis');
-  for (let page = start; page <= end; page += 1) pages.push(page);
-  if (end < totalPages - 1) pages.push('ellipsis');
-  pages.push(totalPages);
+function getStorageKey(category: CantoneseCategory) {
+  return `${STREAM_STATE_PREFIX}:${category}`;
+}
 
-  return pages;
+function readSavedState(category: CantoneseCategory): StoredStreamState | null {
+  try {
+    const raw = sessionStorage.getItem(getStorageKey(category));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredStreamState;
+    if (!Array.isArray(parsed.items) || (parsed.hasMore && !parsed.cursor)) {
+      return null;
+    }
+    if (
+      parsed.cursor &&
+      (!Number.isInteger(parsed.cursor.sourceIndex) ||
+        !Number.isInteger(parsed.cursor.page))
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function saveState(category: CantoneseCategory, state: StoredStreamState) {
+  sessionStorage.setItem(getStorageKey(category), JSON.stringify(state));
 }
 
 export default function CantonesePage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const requestedCategory = searchParams.get('category');
+  const { mainContainerRef } = useSite();
   const category: CantoneseCategory =
-    requestedCategory === 'movie' ? 'movie' : 'series';
-  const requestedPage = Number(searchParams.get('page') || '1');
-  const page =
-    Number.isInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1;
+    searchParams.get("category") === "movie" ? "movie" : "series";
 
   const [items, setItems] = useState<SearchResult[]>([]);
-  const [pageCount, setPageCount] = useState(0);
-  const [total, setTotal] = useState(0);
-  const [sourceCount, setSourceCount] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const [error, setError] = useState("");
+  const [sourceCount, setSourceCount] = useState(0);
+  const [sourceName, setSourceName] = useState("");
+  const [sourcePage, setSourcePage] = useState(1);
 
-  useEffect(() => {
-    const controller = new AbortController();
-    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
-    let refreshAttempts = 0;
+  const itemsRef = useRef<SearchResult[]>([]);
+  const cursorRef = useRef<StreamCursor | null>({ sourceIndex: 0, page: 1 });
+  const hasMoreRef = useRef<boolean>(true);
+  const loadingRef = useRef(false);
+  const sourceCountRef = useRef(0);
+  const sourceNameRef = useRef("");
+  const sourcePageRef = useRef(1);
+  const generationRef = useRef(0);
+  const loadMoreRef = useRef<() => Promise<void>>(async () => undefined);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+
+  const loadMore = useCallback(async () => {
+    if (loadingRef.current || !hasMoreRef.current || !cursorRef.current) {
+      return;
+    }
+
+    const generation = generationRef.current;
+    loadingRef.current = true;
     setLoading(true);
-    setError('');
+    setError("");
 
-    const fetchCatalog = async () => {
-      try {
-        const response = await fetch(
-          `/api/cantonese-catalog?category=${category}&page=${page}`,
-          { signal: controller.signal }
-        );
+    let nextCursor = cursorRef.current;
+    let nextHasMore: boolean = hasMoreRef.current;
+    let nextSourceCount = sourceCountRef.current;
+    let nextSourceName = sourceNameRef.current;
+    let nextSourcePage = sourcePageRef.current;
+    const receivedItems: SearchResult[] = [];
+
+    try {
+      // Nếu nguồn hiện tại không có phim hợp lệ cho nhóm đang xem, bỏ qua tối
+      // đa vài trang liên tiếp rồi trả quyền điều khiển lại cho thao tác cuộn.
+      for (
+        let batch = 0;
+        batch < MAX_EMPTY_BATCHES_PER_LOAD && nextCursor && nextHasMore;
+        batch += 1
+      ) {
+        const query = new URLSearchParams({
+          category,
+          source: String(nextCursor.sourceIndex),
+          page: String(nextCursor.page),
+        });
+        const response = await fetch(`/api/cantonese-stream?${query}`);
         const data = await response.json();
         if (!response.ok) {
-          throw new Error(data.error || 'Không thể tải danh mục');
+          throw new Error(data.error || "Không thể tải thêm nội dung");
         }
-        if (controller.signal.aborted) return;
-        setItems(data.items || []);
-        setPageCount(data.pageCount || 0);
-        setTotal(data.total || 0);
-        setSourceCount(data.sourceCount || 0);
-        if (data.isPreview && refreshAttempts < 6) {
-          refreshAttempts += 1;
-          refreshTimer = setTimeout(() => {
-            void fetchCatalog();
-          }, 6000);
-        }
-      } catch (requestError) {
-        if (
-          requestError instanceof Error &&
-          requestError.name !== 'AbortError'
-        ) {
-          setError(requestError.message);
-        }
-      } finally {
-        if (!controller.signal.aborted) setLoading(false);
+        if (generation !== generationRef.current) return;
+
+        receivedItems.push(...(data.items || []));
+        nextCursor = data.nextCursor || null;
+        nextHasMore = Boolean(data.hasMore);
+        nextSourceCount = Number(data.sourceCount) || nextSourceCount;
+        nextSourceName = data.sourceName || nextSourceName;
+        nextSourcePage = Number(data.sourcePage) || nextSourcePage;
+
+        if ((data.items || []).length > 0 || !nextHasMore) break;
       }
-    };
 
-    void fetchCatalog();
+      if (generation !== generationRef.current) return;
 
-    return () => {
-      controller.abort();
-      if (refreshTimer) clearTimeout(refreshTimer);
-    };
-  }, [category, page]);
+      const nextItems = mergeUniqueItems(itemsRef.current, receivedItems);
+      itemsRef.current = nextItems;
+      cursorRef.current = nextCursor;
+      hasMoreRef.current = nextHasMore;
+      sourceCountRef.current = nextSourceCount;
+      sourceNameRef.current = nextSourceName;
+      sourcePageRef.current = nextSourcePage;
+      setItems(nextItems);
+      setHasMore(nextHasMore);
+      setSourceCount(nextSourceCount);
+      setSourceName(nextSourceName);
+      setSourcePage(nextSourcePage);
+      saveState(category, {
+        items: nextItems,
+        cursor: nextCursor,
+        hasMore: nextHasMore,
+        sourceCount: nextSourceCount,
+        sourceName: nextSourceName,
+        sourcePage: nextSourcePage,
+      });
+    } catch (requestError) {
+      if (generation === generationRef.current) {
+        setError(
+          requestError instanceof Error
+            ? requestError.message
+            : "Không thể tải thêm nội dung"
+        );
+      }
+    } finally {
+      if (generation === generationRef.current) {
+        loadingRef.current = false;
+        setLoading(false);
+      }
+    }
+  }, [category]);
 
-  const navigate = (nextCategory: CantoneseCategory, nextPage = 1) => {
-    const query = new URLSearchParams({
-      category: nextCategory,
-      page: String(nextPage),
-    });
-    router.push(`/cantonese?${query}`);
+  loadMoreRef.current = loadMore;
+
+  useEffect(() => {
+    generationRef.current += 1;
+    const savedState = readSavedState(category);
+
+    if (savedState) {
+      itemsRef.current = mergeUniqueItems([], savedState.items);
+      cursorRef.current = savedState.cursor;
+      hasMoreRef.current = savedState.hasMore;
+      sourceCountRef.current = savedState.sourceCount;
+      sourceNameRef.current = savedState.sourceName;
+      sourcePageRef.current = savedState.sourcePage;
+      setItems(itemsRef.current);
+      setHasMore(savedState.hasMore);
+      setSourceCount(savedState.sourceCount);
+      setSourceName(savedState.sourceName);
+      setSourcePage(savedState.sourcePage);
+      setLoading(false);
+      setError("");
+      return;
+    }
+
+    itemsRef.current = [];
+    cursorRef.current = { sourceIndex: 0, page: 1 };
+    hasMoreRef.current = true;
+    loadingRef.current = false;
+    sourceCountRef.current = 0;
+    sourceNameRef.current = "";
+    sourcePageRef.current = 1;
+    setItems([]);
+    setHasMore(true);
+    setSourceCount(0);
+    setSourceName("");
+    setSourcePage(1);
+    setLoading(true);
+    setError("");
+    void loadMore();
+  }, [category, loadMore]);
+
+  useEffect(() => {
+    const target = sentinelRef.current;
+    if (!target || !hasMore) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          void loadMoreRef.current();
+        }
+      },
+      {
+        root: mainContainerRef?.current || null,
+        rootMargin: "700px 0px",
+      }
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [hasMore, loading, mainContainerRef]);
+
+  const navigate = (nextCategory: CantoneseCategory) => {
+    router.push(`/cantonese?category=${nextCategory}`);
   };
 
   const goBack = () => {
     if (window.history.length > 1) {
       router.back();
     } else {
-      router.push('/');
+      router.push("/");
     }
   };
 
-  const visiblePages = useMemo(
-    () => getVisiblePages(page, pageCount),
-    [page, pageCount]
-  );
+  const initialLoading = loading && items.length === 0;
 
   return (
     <PageLayout activePath="/cantonese" title="粤语专区">
@@ -134,7 +298,7 @@ export default function CantonesePage() {
             </button>
             <button
               type="button"
-              onClick={() => router.push('/')}
+              onClick={() => router.push("/")}
               className="inline-flex items-center gap-2 rounded-lg bg-blue-500 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-600"
             >
               <Home className="h-4 w-4" />
@@ -145,8 +309,8 @@ export default function CantonesePage() {
             粤语专区
           </h1>
           <p className="text-sm text-gray-500 dark:text-gray-400">
-            Tổng hợp từ mọi nguồn đang bật, chỉ giữ phim có tiếng Quảng Đông và
-            tự loại các tên trùng nhau.
+            Tải dần theo lúc bạn cuộn, quét tới khi hết từng nguồn, chỉ giữ phim
+            tiếng Quảng Đông và tự loại tên trùng nhau.
           </p>
         </div>
 
@@ -160,8 +324,8 @@ export default function CantonesePage() {
               onClick={() => navigate(key)}
               className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
                 category === key
-                  ? 'bg-blue-500 text-white'
-                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700'
+                  ? "bg-blue-500 text-white"
+                  : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
               }`}
             >
               {CATEGORIES[key]}
@@ -170,95 +334,75 @@ export default function CantonesePage() {
         </div>
 
         {error && (
-          <p className="rounded-lg bg-red-50 p-4 text-red-700 dark:bg-red-950/40 dark:text-red-300">
-            {error}
-          </p>
-        )}
-        {loading && (
-          <div className="grid grid-cols-3 gap-x-3 gap-y-6 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7">
-            {Array.from({ length: 20 }).map((_, index) => (
-              <VideoCardSkeleton key={index} className="w-full" showYear />
-            ))}
+          <div className="mb-6 rounded-lg bg-red-50 p-4 text-red-700 dark:bg-red-950/40 dark:text-red-300">
+            <p>{error}</p>
+            <button
+              type="button"
+              onClick={() => void loadMore()}
+              className="mt-2 text-sm font-medium underline"
+            >
+              Thử lại
+            </button>
           </div>
         )}
-        {!loading && !error && items.length === 0 && (
+
+        {items.length > 0 && (
+          <p className="mb-4 text-sm text-gray-500 dark:text-gray-400">
+            Đã tải {items.length.toLocaleString("vi-VN")} phim
+            {hasMore
+              ? ` · đang quét ${
+                  sourceName || "nguồn phim"
+                } (trang ${sourcePage})`
+              : ` · đã quét hết ${sourceCount} nguồn`}
+          </p>
+        )}
+
+        <div className="grid grid-cols-3 gap-x-3 gap-y-6 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7">
+          {items.map((item, index) => (
+            <VideoCard
+              key={`${item.source}-${item.id}`}
+              id={item.id}
+              title={item.title}
+              poster={item.poster}
+              episodes={item.episodes.length}
+              source={item.source}
+              source_name={item.source_name}
+              year={item.year}
+              from="search"
+              priority={index < 6}
+            />
+          ))}
+          {loading &&
+            Array.from({ length: initialLoading ? 20 : 7 }).map((_, index) => (
+              <VideoCardSkeleton key={index} className="w-full" showYear />
+            ))}
+        </div>
+
+        {!loading && !error && items.length === 0 && !hasMore && (
           <p className="py-12 text-center text-gray-500">
             Chưa tìm thấy nội dung phù hợp.
           </p>
         )}
-        {!loading && !error && items.length > 0 && (
-          <>
-            <p className="mb-4 text-sm text-gray-500 dark:text-gray-400">
-              Hiển thị {items.length} / {total.toLocaleString('vi-VN')} nội dung
-              từ {sourceCount} nguồn.
-            </p>
-            <div className="grid grid-cols-3 gap-x-3 gap-y-6 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7">
-              {items.map((item, index) => (
-                <VideoCard
-                  key={`${item.source}-${item.id}`}
-                  id={item.id}
-                  title={item.title}
-                  poster={item.poster}
-                  episodes={item.episodes.length}
-                  source={item.source}
-                  source_name={item.source_name}
-                  year={item.year}
-                  from="search"
-                  priority={index < 6}
-                />
-              ))}
-            </div>
-          </>
-        )}
 
-        {!loading && !error && pageCount > 1 && (
-          <nav
-            className="mt-8 flex flex-wrap items-center justify-center gap-2"
-            aria-label="Phân trang danh mục 粤语"
-          >
-            <button
-              type="button"
-              disabled={page === 1}
-              onClick={() => navigate(category, page - 1)}
-              className="inline-flex items-center gap-1 rounded-lg bg-gray-100 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50 dark:bg-gray-800"
-            >
-              <ChevronLeft className="h-4 w-4" /> Trước
-            </button>
-            {visiblePages.map((pageNumber, index) =>
-              pageNumber === 'ellipsis' ? (
-                <span
-                  key={`ellipsis-${index}`}
-                  className="px-1 text-gray-500"
-                  aria-hidden="true"
-                >
-                  …
-                </span>
-              ) : (
-                <button
-                  key={pageNumber}
-                  type="button"
-                  onClick={() => navigate(category, pageNumber)}
-                  aria-current={pageNumber === page ? 'page' : undefined}
-                  className={`min-w-10 rounded-lg px-3 py-2 text-sm transition-colors ${
-                    pageNumber === page
-                      ? 'bg-blue-500 text-white'
-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700'
-                  }`}
-                >
-                  {pageNumber}
-                </button>
-              )
-            )}
-            <button
-              type="button"
-              disabled={page >= pageCount}
-              onClick={() => navigate(category, page + 1)}
-              className="inline-flex items-center gap-1 rounded-lg bg-gray-100 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50 dark:bg-gray-800"
-            >
-              Sau <ChevronRight className="h-4 w-4" />
-            </button>
-          </nav>
-        )}
+        <div
+          ref={sentinelRef}
+          className="flex min-h-16 items-center justify-center"
+        >
+          {loading && !initialLoading && (
+            <span className="inline-flex items-center gap-2 text-sm text-gray-500">
+              <LoaderCircle className="h-4 w-4 animate-spin" />
+              Đang tải thêm…
+            </span>
+          )}
+          {!loading && hasMore && items.length > 0 && (
+            <span className="text-sm text-gray-500">Kéo xuống để tải tiếp</span>
+          )}
+          {!loading && !hasMore && items.length > 0 && (
+            <span className="text-sm text-gray-500">
+              Đã tải hết nội dung tìm được
+            </span>
+          )}
+        </div>
       </div>
     </PageLayout>
   );
