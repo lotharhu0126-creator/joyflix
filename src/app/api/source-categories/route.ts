@@ -14,6 +14,7 @@ import { SearchResult } from '@/lib/types';
 export const runtime = 'nodejs';
 
 const BDZY_SOURCE_KEY = 'bdzy';
+const BDZY_RELAY_URL_ENV = 'BDZY_RELAY_URL';
 const BDZY_TIMEOUT_MS = 10_000;
 const BDZY_MAX_ATTEMPTS = 2;
 const BDZY_HEADERS = {
@@ -89,7 +90,10 @@ function describeError(error: unknown) {
   };
 }
 
-async function fetchBdzy(url: URL): Promise<Response> {
+async function fetchBdzy(
+  url: URL,
+  requestTarget: 'upstream' | 'relay'
+): Promise<Response> {
   for (let attempt = 1; attempt <= BDZY_MAX_ATTEMPTS; attempt += 1) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), BDZY_TIMEOUT_MS);
@@ -106,6 +110,7 @@ async function fetchBdzy(url: URL): Promise<Response> {
       const retryable = RETRIABLE_STATUS_CODES.has(response.status);
       console.warn('[BDZY] Upstream returned a non-success response', {
         attempt,
+        requestTarget,
         status: response.status,
         statusText: response.statusText,
         retryable,
@@ -124,6 +129,7 @@ async function fetchBdzy(url: URL): Promise<Response> {
       const timedOut = error instanceof Error && error.name === 'AbortError';
       console.error('[BDZY] Request from server failed', {
         attempt,
+        requestTarget,
         timedOut,
         ...describeError(error),
       });
@@ -143,6 +149,59 @@ async function fetchBdzy(url: URL): Promise<Response> {
   }
 
   throw new BdzyRequestError('BDZY network request failed', 'network');
+}
+
+function getBdzyRelayUrl(upstreamUrl: URL): URL | null {
+  const configuredUrl = process.env[BDZY_RELAY_URL_ENV]?.trim();
+  if (!configuredUrl) return null;
+
+  try {
+    const relayUrl = new URL(configuredUrl);
+    if (relayUrl.protocol !== 'https:') {
+      console.error('[BDZY] Relay URL must use HTTPS');
+      return null;
+    }
+    // Relay chỉ nhận các query BDZY đã được tạo ở route này, không nhận target
+    // URL từ trình duyệt nên không thể biến thành open proxy.
+    relayUrl.search = upstreamUrl.search;
+    return relayUrl;
+  } catch (error) {
+    console.error('[BDZY] Relay URL is invalid', describeError(error));
+    return null;
+  }
+}
+
+function shouldRetryThroughRelay(error: BdzyRequestError) {
+  return (
+    error.type === 'network' ||
+    error.type === 'timeout' ||
+    error.upstreamStatus === 401 ||
+    error.upstreamStatus === 403 ||
+    error.upstreamStatus === 429 ||
+    (error.upstreamStatus != null && error.upstreamStatus >= 500)
+  );
+}
+
+async function fetchBdzyWithFallback(upstreamUrl: URL): Promise<Response> {
+  try {
+    return await fetchBdzy(upstreamUrl, 'upstream');
+  } catch (error) {
+    if (
+      !(error instanceof BdzyRequestError) ||
+      !shouldRetryThroughRelay(error)
+    ) {
+      throw error;
+    }
+
+    const relayUrl = getBdzyRelayUrl(upstreamUrl);
+    if (!relayUrl) throw error;
+
+    console.warn('[BDZY] Direct request failed; using dedicated relay', {
+      type: error.type,
+      upstreamStatus: error.upstreamStatus,
+    });
+    return fetchBdzy(relayUrl, 'relay');
+  }
 }
 
 export async function GET(request: NextRequest) {
@@ -199,7 +258,7 @@ export async function GET(request: NextRequest) {
   if (language) url.searchParams.set('wd', language);
 
   try {
-    const response = await fetchBdzy(url);
+    const response = await fetchBdzyWithFallback(url);
 
     const data = await response.json();
     if (!data || !Array.isArray(data.list)) {

@@ -133,6 +133,16 @@
 4. 设置环境变量 NEXT_PUBLIC_STORAGE_TYPE，值为 **upstash**；设置 `AUTH_SECRET`，并可设置 `USERNAME` 和 `OWNER_PASSWORD` 作为超管账号
 5. 重试部署
 
+#### BDZY relay khi Netlify báo HTTP 403
+
+BDZY có thể chặn IP của Netlify. Khi endpoint `/api/source-categories` trả lỗi `HTTP 403`, triển khai worker giới hạn sẵn trong repo này, thay vì dùng một proxy công khai:
+
+1. Đăng nhập Cloudflare, cài/đăng nhập Wrangler trên máy của bạn rồi chạy `npx wrangler deploy --config workers/bdzy-relay/wrangler.toml`.
+2. Wrangler sẽ trả một URL dạng `https://joyflix-bdzy-relay.<tên-tài-khoản>.workers.dev`. Kiểm tra `https://...workers.dev/bdzy?ac=videolist&t=6&pg=1` phải trả JSON.
+3. Trong **Netlify → Project configuration → Environment variables**, thêm `BDZY_RELAY_URL` với giá trị `https://...workers.dev/bdzy`, rồi trigger deploy lại.
+
+Worker chỉ chấp nhận `GET /bdzy` với bốn query `ac`, `t`, `pg`, `wd`, và luôn gọi cố định `api.apibdzy.com`; không thể dùng nó để proxy URL khác, stream video hoặc hình ảnh.
+
 ### 爪云部署
 
 #### 普通部署（localstorage）
@@ -208,6 +218,7 @@ networks:
 | REDIS_URL                           | redis 连接 url                                  | 连接 url                             | 空                  |
 | UPSTASH_URL                         | upstash redis 连接 url                          | 连接 url                             | 空                  |
 | UPSTASH_TOKEN                       | upstash redis 连接 token                        | 连接 token                           | 空                  |
+| BDZY_RELAY_URL                      | URL worker relay BDZY khi Netlify bị BDZY chặn  | https://...workers.dev/bdzy          | （空）              |
 | NEXT_PUBLIC_SEARCH_MAX_PAGE         | 搜索接口可拉取的最大页数                        | 1-50                                 | 5                   |
 | NEXT_PUBLIC_DOUBAN_PROXY_TYPE       | 豆瓣数据源请求方式                              | 见下方                               | direct              |
 | NEXT_PUBLIC_DOUBAN_PROXY            | 自定义豆瓣数据代理 URL                          | url prefix                           | (空)                |
