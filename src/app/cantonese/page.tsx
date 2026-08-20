@@ -98,6 +98,14 @@ function saveScrollPosition(category: CantoneseCategory, scrollTop: number) {
   }
 }
 
+function getPageScrollTop() {
+  return Math.max(
+    window.scrollY,
+    document.documentElement.scrollTop,
+    document.body.scrollTop
+  );
+}
+
 function readSavedState(category: CantoneseCategory): StoredStreamState | null {
   try {
     const raw = sessionStorage.getItem(getStorageKey(category));
@@ -153,8 +161,13 @@ export default function CantonesePage() {
   const scrollSaveTimerRef = useRef<number | null>(null);
 
   const persistScrollPosition = useCallback(() => {
-    const scrollTop =
-      mainContainerRef?.current?.scrollTop ?? scrollPositionRef.current;
+    const containerScrollTop = mainContainerRef?.current?.scrollTop ?? 0;
+    // Desktop dùng khung nội dung để cuộn, còn điện thoại thường cuộn toàn trang.
+    const scrollTop = Math.max(
+      containerScrollTop,
+      getPageScrollTop(),
+      scrollPositionRef.current
+    );
     scrollPositionRef.current = scrollTop;
     saveScrollPosition(category, scrollTop);
   }, [category, mainContainerRef]);
@@ -290,7 +303,6 @@ export default function CantonesePage() {
 
   useEffect(() => {
     const container = mainContainerRef?.current;
-    if (!container) return;
 
     const flushScrollPosition = () => {
       if (scrollSaveTimerRef.current !== null) {
@@ -301,14 +313,21 @@ export default function CantonesePage() {
     };
 
     const handleScroll = () => {
-      scrollPositionRef.current = container.scrollTop;
+      scrollPositionRef.current = Math.max(
+        container?.scrollTop ?? 0,
+        getPageScrollTop()
+      );
       if (scrollSaveTimerRef.current !== null) return;
       scrollSaveTimerRef.current = window.setTimeout(flushScrollPosition, 150);
     };
 
-    container.addEventListener("scroll", handleScroll, { passive: true });
+    container?.addEventListener("scroll", handleScroll, { passive: true });
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    window.addEventListener("pagehide", flushScrollPosition);
     return () => {
-      container.removeEventListener("scroll", handleScroll);
+      container?.removeEventListener("scroll", handleScroll);
+      window.removeEventListener("scroll", handleScroll);
+      window.removeEventListener("pagehide", flushScrollPosition);
       flushScrollPosition();
     };
   }, [mainContainerRef, persistScrollPosition]);
@@ -325,12 +344,21 @@ export default function CantonesePage() {
       return;
     }
 
-    const frame = window.requestAnimationFrame(() => {
+    const restoreScrollPosition = () => {
       container.scrollTo({ top: scrollTop, behavior: "auto" });
+      window.scrollTo({ top: scrollTop, behavior: "auto" });
       scrollPositionRef.current = scrollTop;
-      pendingScrollRestoreRef.current = null;
-    });
-    return () => window.cancelAnimationFrame(frame);
+    };
+
+    // Next.js có thể đặt lại vị trí sau khi trang được mount; lần thứ hai giữ
+    // lại đúng điểm cũ sau khi thao tác Back hoàn tất.
+    const frame = window.requestAnimationFrame(restoreScrollPosition);
+    const retryTimer = window.setTimeout(restoreScrollPosition, 180);
+    pendingScrollRestoreRef.current = null;
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(retryTimer);
+    };
   }, [category, items.length, loading, mainContainerRef]);
 
   useEffect(() => {
