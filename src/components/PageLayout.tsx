@@ -38,6 +38,7 @@ const PageLayout = ({
     pathname.startsWith("/admin/") && pathname !== "/admin";
   const showTabletSidebar =
     pathname === "/" || pathname === "/douban" || pathname === "/search";
+  const showBackToTop = showTabletSidebar || pathname === "/cantonese";
 
   const showFloatingHeader =
     pathname === "/" || pathname === "/douban" || pathname === "/search";
@@ -168,8 +169,8 @@ const PageLayout = ({
         <MobileBottomNav activePath={activePath} />
       </div>
 
-      {/* 返回顶部按钮 - 仅在特定平板页面显示 */}
-      {showTabletSidebar && <BackToTopButton />}
+      {/* 返回顶部按钮 */}
+      {showBackToTop && <BackToTopButton />}
     </div>
   );
 };

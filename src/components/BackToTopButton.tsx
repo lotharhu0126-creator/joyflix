@@ -3,20 +3,18 @@
 import { ChevronUp } from 'lucide-react';
 import { useState, useEffect, useCallback } from 'react';
 import { useSite } from './SiteProvider';
-import { useFloatingHeaderVisibility } from '@/lib/useFloatingHeaderVisibility';
 
 export function BackToTopButton() {
   const { mainContainerRef } = useSite();
-  const isScrollingUp = useFloatingHeaderVisibility(mainContainerRef || null);
   const [isVisible, setIsVisible] = useState(false);
 
   const handleScroll = useCallback(() => {
     if (mainContainerRef && mainContainerRef.current) {
       const { scrollTop } = mainContainerRef.current;
-      // When scrolled down more than 400px, show the button
-      setIsVisible(scrollTop > 400 && isScrollingUp);
+      // Hiển thị ngay khi đã cuộn đủ xa để người dùng có thể quay lại đầu nhanh.
+      setIsVisible(scrollTop > 400);
     }
-  }, [mainContainerRef, isScrollingUp]);
+  }, [mainContainerRef]);
 
   useEffect(() => {
     const container = mainContainerRef?.current;
@@ -45,7 +43,9 @@ export function BackToTopButton() {
   return (
     <button
       onClick={scrollToTop}
-      className={`fixed bottom-6 right-6 z-[999] p-3 rounded-full bg-gray-100/90 dark:bg-gray-800/90 backdrop-blur-sm shadow-lg border border-gray-200/30 dark:border-gray-700/30 transition-all duration-300 ease-in-out hover:scale-110 hover:bg-gray-100/95 dark:hover:bg-gray-700/95 ${
+      aria-label="Trở về đầu trang"
+      title="Trở về đầu trang"
+      className={`fixed bottom-20 right-5 z-[999] rounded-full border border-gray-200/30 bg-gray-100/90 p-3 shadow-lg backdrop-blur-sm transition-all duration-300 ease-in-out hover:scale-110 hover:bg-gray-100/95 dark:border-gray-700/30 dark:bg-gray-800/90 dark:hover:bg-gray-700/95 md:bottom-6 md:right-6 ${
         isVisible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4 pointer-events-none'
       }`}
     >

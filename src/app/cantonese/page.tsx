@@ -74,6 +74,30 @@ function getStorageKey(category: CantoneseCategory) {
   return `${STREAM_STATE_PREFIX}:${category}`;
 }
 
+function getScrollStorageKey(category: CantoneseCategory) {
+  return `${getStorageKey(category)}:scroll-top`;
+}
+
+function readSavedScrollPosition(category: CantoneseCategory) {
+  try {
+    const saved = Number(sessionStorage.getItem(getScrollStorageKey(category)));
+    return Number.isFinite(saved) && saved > 0 ? saved : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function saveScrollPosition(category: CantoneseCategory, scrollTop: number) {
+  try {
+    sessionStorage.setItem(
+      getScrollStorageKey(category),
+      String(Math.max(0, Math.round(scrollTop)))
+    );
+  } catch {
+    // Không để lỗi bộ nhớ phiên làm gián đoạn việc duyệt phim.
+  }
+}
+
 function readSavedState(category: CantoneseCategory): StoredStreamState | null {
   try {
     const raw = sessionStorage.getItem(getStorageKey(category));
@@ -124,6 +148,16 @@ export default function CantonesePage() {
   const generationRef = useRef(0);
   const loadMoreRef = useRef<() => Promise<void>>(async () => undefined);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const scrollPositionRef = useRef(0);
+  const pendingScrollRestoreRef = useRef<number | null>(null);
+  const scrollSaveTimerRef = useRef<number | null>(null);
+
+  const persistScrollPosition = useCallback(() => {
+    const scrollTop =
+      mainContainerRef?.current?.scrollTop ?? scrollPositionRef.current;
+    scrollPositionRef.current = scrollTop;
+    saveScrollPosition(category, scrollTop);
+  }, [category, mainContainerRef]);
 
   const loadMore = useCallback(async () => {
     if (loadingRef.current || !hasMoreRef.current || !cursorRef.current) {
@@ -215,6 +249,10 @@ export default function CantonesePage() {
   useEffect(() => {
     generationRef.current += 1;
     const savedState = readSavedState(category);
+    const savedScrollPosition = readSavedScrollPosition(category);
+    // Mỗi tab có vị trí riêng; tab chưa từng mở sẽ bắt đầu từ đầu trang.
+    pendingScrollRestoreRef.current = savedState ? savedScrollPosition : 0;
+    scrollPositionRef.current = savedScrollPosition;
 
     if (savedState) {
       itemsRef.current = mergeUniqueItems([], savedState.items);
@@ -251,6 +289,51 @@ export default function CantonesePage() {
   }, [category, loadMore]);
 
   useEffect(() => {
+    const container = mainContainerRef?.current;
+    if (!container) return;
+
+    const flushScrollPosition = () => {
+      if (scrollSaveTimerRef.current !== null) {
+        window.clearTimeout(scrollSaveTimerRef.current);
+        scrollSaveTimerRef.current = null;
+      }
+      persistScrollPosition();
+    };
+
+    const handleScroll = () => {
+      scrollPositionRef.current = container.scrollTop;
+      if (scrollSaveTimerRef.current !== null) return;
+      scrollSaveTimerRef.current = window.setTimeout(flushScrollPosition, 150);
+    };
+
+    container.addEventListener("scroll", handleScroll, { passive: true });
+    return () => {
+      container.removeEventListener("scroll", handleScroll);
+      flushScrollPosition();
+    };
+  }, [mainContainerRef, persistScrollPosition]);
+
+  useEffect(() => {
+    const scrollTop = pendingScrollRestoreRef.current;
+    const container = mainContainerRef?.current;
+    if (
+      scrollTop === null ||
+      !container ||
+      loading ||
+      (scrollTop > 0 && items.length === 0)
+    ) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      container.scrollTo({ top: scrollTop, behavior: "auto" });
+      scrollPositionRef.current = scrollTop;
+      pendingScrollRestoreRef.current = null;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [category, items.length, loading, mainContainerRef]);
+
+  useEffect(() => {
     const target = sentinelRef.current;
     if (!target || !hasMore) return;
 
@@ -270,10 +353,12 @@ export default function CantonesePage() {
   }, [hasMore, loading, mainContainerRef]);
 
   const navigate = (nextCategory: CantoneseCategory) => {
+    persistScrollPosition();
     router.push(`/cantonese?category=${nextCategory}`);
   };
 
   const goBack = () => {
+    persistScrollPosition();
     if (window.history.length > 1) {
       router.back();
     } else {
@@ -370,6 +455,7 @@ export default function CantonesePage() {
               year={item.year}
               from="search"
               priority={index < 6}
+              onNavigate={persistScrollPosition}
             />
           ))}
           {loading &&
