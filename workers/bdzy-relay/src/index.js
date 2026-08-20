@@ -33,10 +33,19 @@ export default {
       return jsonResponse({ error: 'Invalid BDZY action' }, 400);
     }
 
-    const typeId = parsePositiveInteger(requestUrl.searchParams.get('t'), 999);
+    // `t` chỉ cần khi duyệt một thể loại BDZY cụ thể. Tìm kiếm theo `wd`
+    // (ví dụ "粤语") phải được phép đi qua toàn bộ danh mục nguồn này.
+    const requestedTypeId = requestUrl.searchParams.get('t');
+    const typeId = requestedTypeId
+      ? parsePositiveInteger(requestedTypeId, 999)
+      : null;
     const page = parsePositiveInteger(requestUrl.searchParams.get('pg') || '1', 1000);
     const keyword = requestUrl.searchParams.get('wd');
-    if (!typeId || !page || (keyword && keyword.length > 100)) {
+    if (
+      !page ||
+      (requestedTypeId !== null && !typeId) ||
+      (keyword && keyword.length > 100)
+    ) {
       return jsonResponse({ error: 'Invalid BDZY query' }, 400);
     }
 
@@ -44,7 +53,7 @@ export default {
     // bất kỳ, không proxy video/image và chỉ relay danh sách BDZY cho JoyFlix.
     const upstreamUrl = new URL(BDZY_API_URL);
     upstreamUrl.searchParams.set('ac', 'videolist');
-    upstreamUrl.searchParams.set('t', typeId);
+    if (typeId) upstreamUrl.searchParams.set('t', typeId);
     upstreamUrl.searchParams.set('pg', page);
     if (keyword) upstreamUrl.searchParams.set('wd', keyword);
 
