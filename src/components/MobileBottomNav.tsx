@@ -52,6 +52,11 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
       label: '综艺',
       href: '/douban?type=show',
     },
+    {
+      icon: CircleEllipsis,
+      label: 'Khám phá',
+      href: '/source',
+    },
   ]);
 
   useEffect(() => {
@@ -84,7 +89,7 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
 
   return (
     <nav
-      className='md:hidden fixed left-0 right-0 z-[600] bg-white/60 backdrop-blur-2xl border-t border-gray-200/50 overflow-hidden dark:bg-gray-900/60 dark:border-gray-700/50'
+      className="md:hidden fixed left-0 right-0 z-[600] bg-white/60 backdrop-blur-2xl border-t border-gray-200/50 overflow-hidden dark:bg-gray-900/60 dark:border-gray-700/50"
       style={{
         /* 紧贴视口底部，同时在内部留出安全区高度 */
         bottom: 0,
@@ -92,13 +97,13 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
         minHeight: 'calc(3.5rem + env(safe-area-inset-bottom))',
       }}
     >
-      <ul className='flex items-center overflow-x-auto scrollbar-hide'>
+      <ul className="flex items-center overflow-x-auto scrollbar-hide">
         {navItems.map((item) => {
           const active = isActive(item.href);
           return (
             <li
               key={item.href}
-              className='flex-shrink-0'
+              className="flex-shrink-0"
               style={{ width: '20vw', minWidth: '20vw' }}
             >
               <Link
@@ -107,7 +112,7 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
                   window.dispatchEvent(new CustomEvent('clearHomepageScroll'));
                   clearAllScrollCaches();
                 }}
-                className='flex flex-col items-center justify-center w-full h-14 gap-1 text-xs'
+                className="flex flex-col items-center justify-center w-full h-14 gap-1 text-xs"
               >
                 <item.icon
                   className={`h-6 w-6 ${

@@ -1,13 +1,14 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 
+import { filterAdultResults } from '@/lib/adult-content';
+import { hasValidAccountSession } from '@/lib/auth';
 import { getCacheTime, getConfig } from '@/lib/config';
 import { searchFromApi } from '@/lib/downstream';
 
-
-export const runtime = 'edge';
+export const runtime = 'nodejs';
 
 // OrionTV 兼容接口
-export async function GET(request: Request) {
+export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const query = searchParams.get('q');
   const resourceId = searchParams.get('resourceId');
@@ -43,10 +44,11 @@ export async function GET(request: Request) {
       );
     }
 
-    const results = await searchFromApi(targetSite, query);
-    let result = results.filter((r) => r.title === query);
-    
-    const cacheTime = await getCacheTime();
+    const results = filterAdultResults(
+      await searchFromApi(targetSite, query),
+      await hasValidAccountSession(request)
+    );
+    const result = results.filter((r) => r.title === query);
 
     if (result.length === 0) {
       return NextResponse.json(
@@ -61,10 +63,7 @@ export async function GET(request: Request) {
         { results: result },
         {
           headers: {
-            'Cache-Control': `public, max-age=${cacheTime}, s-maxage=${cacheTime}`,
-            'CDN-Cache-Control': `public, s-maxage=${cacheTime}`,
-            'Vercel-CDN-Cache-Control': `public, s-maxage=${cacheTime}`,
-            'Netlify-Vary': 'query',
+            'Cache-Control': 'private, no-store',
           },
         }
       );

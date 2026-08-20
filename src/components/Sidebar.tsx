@@ -2,7 +2,15 @@
 
 'use client';
 
-import { Twitter, CircleEllipsis, Drama, Clapperboard, Home, Tv } from 'lucide-react';
+import {
+  Twitter,
+  CircleEllipsis,
+  Drama,
+  Clapperboard,
+  Home,
+  Tv,
+  ListVideo,
+} from 'lucide-react';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import {
@@ -34,10 +42,10 @@ const Logo = () => {
   const { siteName } = useSite();
   return (
     <Link
-      href='/'
-      className='flex items-center justify-center h-16 select-none hover:opacity-80 transition-opacity duration-200'
+      href="/"
+      className="flex items-center justify-center h-16 select-none hover:opacity-80 transition-opacity duration-200"
     >
-      <span className='text-2xl font-bold text-blue-400 tracking-tight'>
+      <span className="text-2xl font-bold text-blue-400 tracking-tight">
         {siteName}
       </span>
     </Link>
@@ -50,18 +58,16 @@ interface SidebarProps {
   onCategorySelect?: () => void; // 新增属性
 }
 
-
-
-const Sidebar = ({ activePath = '/', isTabletMode = false, onCategorySelect }: SidebarProps) => {
+const Sidebar = ({
+  activePath = '/',
+  isTabletMode = false,
+  onCategorySelect,
+}: SidebarProps) => {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
   // 若同一次 SPA 会话中已经读取过折叠状态，则直接复用，避免闪烁
   const [isCollapsed, setIsCollapsed] = useState<boolean>(false);
-
-  
-
-  
 
   const [active, setActive] = useState(activePath);
 
@@ -79,8 +85,6 @@ const Sidebar = ({ activePath = '/', isTabletMode = false, onCategorySelect }: S
       setActive(fullPath);
     }
   }, [activePath, pathname, searchParams]);
-
-  
 
   const handleSearchClick = () => {
     router.push('/search');
@@ -108,6 +112,11 @@ const Sidebar = ({ activePath = '/', isTabletMode = false, onCategorySelect }: S
       icon: Drama,
       label: '综艺',
       href: '/douban?type=show',
+    },
+    {
+      icon: ListVideo,
+      label: 'Khám phá',
+      href: '/source',
     },
   ]);
 
@@ -138,7 +147,7 @@ const Sidebar = ({ activePath = '/', isTabletMode = false, onCategorySelect }: S
   return (
     <SidebarContext.Provider value={contextValue}>
       {/* 在移动端隐藏侧边栏 */}
-      <div className='hidden md:flex'>
+      <div className="hidden md:flex">
         <aside
           data-sidebar
           className={`fixed top-0 left-0 h-screen bg-white/40 backdrop-blur-xl transition-all duration-300 border-r border-gray-200/50 z-10 shadow-lg dark:bg-gray-900/70 dark:border-gray-700/50 pt-[env(safe-area-inset-top)] w-64`}
@@ -147,23 +156,22 @@ const Sidebar = ({ activePath = '/', isTabletMode = false, onCategorySelect }: S
             WebkitBackdropFilter: 'blur(20px)',
           }}
         >
-          <div className='flex h-full flex-col'>
+          <div className="flex h-full flex-col">
             {/* 顶部 Logo 区域 */}
-            <div className='relative h-16'>
+            <div className="relative h-16">
               <div
                 className={`absolute inset-0 flex items-center justify-center transition-opacity duration-200 ${
                   isCollapsed ? 'opacity-0' : 'opacity-100'
                 }`}
               >
-                <div className='w-[calc(100%-4rem)] flex justify-center'>
+                <div className="w-[calc(100%-4rem)] flex justify-center">
                   {!isCollapsed && <Logo />}
                 </div>
               </div>
-              
             </div>
 
             {/* 导航 */}
-            <nav className='flex-1 overflow-y-auto px-2 mt-4 space-y-1'>
+            <nav className="flex-1 overflow-y-auto px-2 mt-4 space-y-1">
               {[
                 {
                   icon: Home,
@@ -171,10 +179,12 @@ const Sidebar = ({ activePath = '/', isTabletMode = false, onCategorySelect }: S
                   href: '/',
                   onClick: () => {
                     setActive('/');
-                    window.dispatchEvent(new CustomEvent('clearHomepageScroll'));
-                  }
+                    window.dispatchEvent(
+                      new CustomEvent('clearHomepageScroll')
+                    );
+                  },
                 },
-                ...menuItems
+                ...menuItems,
               ].map((item) => {
                 const typeMatch = item.href.match(/type=([^&]+)/)?.[1];
                 const decodedActive = decodeURIComponent(active);
@@ -190,16 +200,18 @@ const Sidebar = ({ activePath = '/', isTabletMode = false, onCategorySelect }: S
                   <Link
                     key={item.label}
                     href={item.href}
-                    onClick={() => item.onClick ? item.onClick() : handleMenuClick(item.href)}
+                    onClick={() =>
+                      item.onClick ? item.onClick() : handleMenuClick(item.href)
+                    }
                     data-active={isActive}
                     className={`group flex items-center rounded-lg px-2 py-2 pl-4 text-gray-700 hover:bg-gray-100/30 hover:text-blue-400 data-[active=true]:bg-blue-400/20 data-[active=true]:text-blue-500 font-medium transition-colors duration-200 min-h-[40px] dark:text-gray-300 dark:hover:text-blue-300 dark:data-[active=true]:bg-blue-400/10 dark:data-[active=true]:text-blue-300 ${
                       isCollapsed ? 'w-full max-w-none mx-0' : 'mx-0'
                     } gap-3 justify-start`}
                   >
-                    <div className='w-4 h-4 flex items-center justify-center'>
-                      <Icon className='h-4 w-4 text-gray-500 group-hover:text-blue-400 data-[active=true]:text-white dark:text-gray-400 dark:group-hover:text-blue-300 dark:data-[active=true]:text-white' />
+                    <div className="w-4 h-4 flex items-center justify-center">
+                      <Icon className="h-4 w-4 text-gray-500 group-hover:text-blue-400 data-[active=true]:text-white dark:text-gray-400 dark:group-hover:text-blue-300 dark:data-[active=true]:text-white" />
                     </div>
-                    <span className='whitespace-nowrap transition-opacity duration-200 opacity-100'>
+                    <span className="whitespace-nowrap transition-opacity duration-200 opacity-100">
                       {item.label}
                     </span>
                   </Link>

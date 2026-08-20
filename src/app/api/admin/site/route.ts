@@ -6,10 +6,10 @@ import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getConfig } from '@/lib/config';
 import { getStorage } from '@/lib/db';
 
-export const runtime = 'edge';
+export const runtime = 'nodejs';
 
 export async function POST(request: NextRequest) {
-  const storageType = process.env.NEXT_PUBLIC_STORAGE_TYPE || 'localstorage';
+  const storageType = process.env.NEXT_PUBLIC_STORAGE_TYPE || 'sqlite';
   if (storageType === 'localstorage') {
     return NextResponse.json(
       {

@@ -13,10 +13,14 @@ interface ApiSearchItem {
   vod_content?: string;
   vod_douban_id?: number;
   type_name?: string;
+  type_id?: number;
 }
 
 // 辅助函数，用于解析 vod_play_url
-function parseVodPlayUrl(vod_play_url: string): { episodes: string[]; titles: string[] } {
+function parseVodPlayUrl(vod_play_url: string): {
+  episodes: string[];
+  titles: string[];
+} {
   let episodes: string[] = [];
   let titles: string[] = [];
 
@@ -63,6 +67,7 @@ function getStreamSearchResultFromApiItem(
     year: item.vod_year ? item.vod_year.match(/\d{4}/)?.[0] || '' : '',
     desc: cleanHtmlTags(item.vod_content || ''),
     type_name: '', // Not requested
+    type_id: item.type_id,
     douban_id: 0, // Not requested
   };
 }
@@ -76,7 +81,8 @@ export async function searchAndFindFromApi(
 ): Promise<SearchResult | null> {
   try {
     const apiBaseUrl = apiSite.api;
-    const firstPageUrl = apiBaseUrl + API_CONFIG.search.path + encodeURIComponent(query);
+    const firstPageUrl =
+      apiBaseUrl + API_CONFIG.search.path + encodeURIComponent(query);
     const apiName = apiSite.name;
 
     const controller = new AbortController();
@@ -92,14 +98,20 @@ export async function searchAndFindFromApi(
     if (!response.ok) return null;
 
     const data = await response.json();
-    if (!data || !data.list || !Array.isArray(data.list) || data.list.length === 0) {
+    if (
+      !data ||
+      !data.list ||
+      !Array.isArray(data.list) ||
+      data.list.length === 0
+    ) {
       return null;
     }
 
     // 在第一页查找匹配项
     for (const item of data.list) {
       if (
-        item.vod_name.replaceAll(' ', '').toLowerCase() === query.replaceAll(' ', '').toLowerCase() &&
+        item.vod_name.replaceAll(' ', '').toLowerCase() ===
+          query.replaceAll(' ', '').toLowerCase() &&
         (year ? item.vod_year === year : true)
       ) {
         const { episodes, titles } = parseVodPlayUrl(item.vod_play_url || '');
@@ -112,13 +124,16 @@ export async function searchAndFindFromApi(
     const pagesToFetch = Math.min(pageCount - 1, maxPages - 1);
 
     if (pagesToFetch > 0) {
-      const pagePromises = Array.from({ length: pagesToFetch }, (_, i) => i + 2).map(async (page) => {
+      const pagePromises = Array.from(
+        { length: pagesToFetch },
+        (_, i) => i + 2
+      ).map(async (page) => {
         const pageUrl =
           apiBaseUrl +
           API_CONFIG.search.pagePath
             .replace('{query}', encodeURIComponent(query))
             .replace('{page}', page.toString());
-        
+
         try {
           const pageController = new AbortController();
           const pageTimeoutId = setTimeout(() => pageController.abort(), 8000);
@@ -132,14 +147,18 @@ export async function searchAndFindFromApi(
 
           if (!pageResponse.ok) return null;
           const pageData = await pageResponse.json();
-          if (!pageData || !pageData.list || !Array.isArray(pageData.list)) return null;
+          if (!pageData || !pageData.list || !Array.isArray(pageData.list))
+            return null;
 
           for (const item of pageData.list) {
             if (
-              item.vod_name.replaceAll(' ', '').toLowerCase() === query.replaceAll(' ', '').toLowerCase() &&
+              item.vod_name.replaceAll(' ', '').toLowerCase() ===
+                query.replaceAll(' ', '').toLowerCase() &&
               (year ? item.vod_year === year : true)
             ) {
-              const { episodes, titles } = parseVodPlayUrl(item.vod_play_url || '');
+              const { episodes, titles } = parseVodPlayUrl(
+                item.vod_play_url || ''
+              );
               return getStreamSearchResultFromApiItem(item, apiSite);
             }
           }
@@ -150,7 +169,9 @@ export async function searchAndFindFromApi(
       });
 
       // 竞速分页的 promise 以找到第一个匹配项
-      const firstMatch = await Promise.race(pagePromises.map(p => p.then(res => res)));
+      const firstMatch = await Promise.race(
+        pagePromises.map((p) => p.then((res) => res))
+      );
       if (firstMatch) return firstMatch;
     }
 

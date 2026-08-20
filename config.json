@@ -111,9 +111,13 @@
     "hn": {
       "api": "https://www.hongniuzy2.com/api.php/provide/vod",
       "name": "红牛资源"
+    },
+    "bdzy": {
+      "api": "https://api.apibdzy.com/api.php/provide/vod/at/json",
+      "name": "BDZY"
     }
   },
-    "custom_category": [
+  "custom_category": [
     {
       "name": "经典",
       "type": "movie",

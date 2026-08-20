@@ -2,20 +2,24 @@
 
 import { AdminConfig } from './admin.types';
 import { RedisStorage } from './redis.db';
+import { SqliteStorage } from './sqlite.db';
 import { Favorite, IStorage, PlayRecord, SkipConfig } from './types';
 import { UpstashRedisStorage } from './upstash.db';
 
-// storage type 常量: 'localstorage' | 'redis' | 'upstash'，默认 'localstorage'
+// storage type 常量: 'sqlite' | 'redis' | 'upstash' | 'localstorage'
 const STORAGE_TYPE =
   (process.env.NEXT_PUBLIC_STORAGE_TYPE as
+    | 'sqlite'
     | 'localstorage'
     | 'redis'
     | 'upstash'
-    | undefined) || 'localstorage';
+    | undefined) || 'sqlite';
 
 // 创建存储实例
 function createStorage(): IStorage {
   switch (STORAGE_TYPE) {
+    case 'sqlite':
+      return new SqliteStorage();
     case 'redis':
       return new RedisStorage();
     case 'upstash':

@@ -13,6 +13,7 @@ interface ApiSearchItem {
   vod_content?: string;
   vod_douban_id?: number;
   type_name?: string;
+  type_id?: number;
 }
 
 export async function searchFromApi(
@@ -94,6 +95,7 @@ export async function searchFromApi(
           : 'unknown',
         desc: cleanHtmlTags(item.vod_content || ''),
         type_name: item.type_name,
+        type_id: item.type_id,
         douban_id: item.vod_douban_id,
       };
     });
@@ -183,6 +185,7 @@ export async function searchFromApi(
                   : 'unknown',
                 desc: cleanHtmlTags(item.vod_content || ''),
                 type_name: item.type_name,
+                type_id: item.type_id,
                 douban_id: item.vod_douban_id,
               };
             });
@@ -299,6 +302,7 @@ export async function getDetailFromApi(
       : 'unknown',
     desc: cleanHtmlTags(videoDetail.vod_content),
     type_name: videoDetail.type_name,
+    type_id: videoDetail.type_id,
     douban_id: videoDetail.vod_douban_id,
   };
 }

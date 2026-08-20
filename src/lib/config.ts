@@ -67,7 +67,7 @@ async function initConfig() {
     // 默认使用编译时生成的配置
     fileConfig = runtimeConfig as unknown as ConfigFileStruct;
   }
-  const storageType = process.env.NEXT_PUBLIC_STORAGE_TYPE || 'localstorage';
+  const storageType = process.env.NEXT_PUBLIC_STORAGE_TYPE || 'sqlite';
   if (storageType !== 'localstorage') {
     // 数据库存储，读取并补全管理员配置
     const storage = getStorage();
@@ -170,7 +170,8 @@ async function initConfig() {
           SiteConfig: {
             SiteName: process.env.NEXT_PUBLIC_SITE_NAME || 'JoyFlix',
             Announcement:
-              process.env.ANNOUNCEMENT || '切勿分享本站，以维持使用体验哦 ʕ •ᴥ•ʔ～✰✰',
+              process.env.ANNOUNCEMENT ||
+              '切勿分享本站，以维持使用体验哦 ʕ •ᴥ•ʔ～✰✰',
             SearchDownstreamMaxPage:
               Number(process.env.NEXT_PUBLIC_SEARCH_MAX_PAGE) || 5,
             SiteInterfaceCacheTime: fileConfig.cache_time || 7200,
@@ -217,7 +218,9 @@ async function initConfig() {
     cachedConfig = {
       SiteConfig: {
         SiteName: process.env.NEXT_PUBLIC_SITE_NAME || 'JoyFlix',
-        Announcement: process.env.ANNOUNCEMENT || '切勿分享本站，以维持使用体验哦 ʕ •ᴥ•ʔ～✰✰',
+        Announcement:
+          process.env.ANNOUNCEMENT ||
+          '切勿分享本站，以维持使用体验哦 ʕ •ᴥ•ʔ～✰✰',
         SearchDownstreamMaxPage:
           Number(process.env.NEXT_PUBLIC_SEARCH_MAX_PAGE) || 5,
         SiteInterfaceCacheTime: fileConfig.cache_time || 7200,
@@ -251,7 +254,7 @@ async function initConfig() {
 }
 
 export async function getConfig(): Promise<AdminConfig> {
-  const storageType = process.env.NEXT_PUBLIC_STORAGE_TYPE || 'localstorage';
+  const storageType = process.env.NEXT_PUBLIC_STORAGE_TYPE || 'sqlite';
   if (process.env.DOCKER_ENV === 'true' || storageType === 'localstorage') {
     await initConfig();
     return cachedConfig;
@@ -273,7 +276,7 @@ export async function getConfig(): Promise<AdminConfig> {
       process.env.NEXT_PUBLIC_SITE_NAME || 'JoyFlix';
     adminConfig.SiteConfig.Announcement =
       process.env.ANNOUNCEMENT || '切勿分享本站，以维持使用体验哦 ʕ •ᴥ•ʔ～✰✰';
-    
+
     adminConfig.SiteConfig.DoubanProxyType =
       process.env.NEXT_PUBLIC_DOUBAN_PROXY_TYPE || 'direct';
     adminConfig.SiteConfig.DoubanProxy =
@@ -361,7 +364,7 @@ export async function getConfig(): Promise<AdminConfig> {
 }
 
 export async function resetConfig() {
-  const storageType = process.env.NEXT_PUBLIC_STORAGE_TYPE || 'localstorage';
+  const storageType = process.env.NEXT_PUBLIC_STORAGE_TYPE || 'sqlite';
   const storage = getStorage();
   // 获取所有用户名，用于补全 Users
   let userNames: string[] = [];
@@ -405,7 +408,8 @@ export async function resetConfig() {
   const adminConfig = {
     SiteConfig: {
       SiteName: process.env.NEXT_PUBLIC_SITE_NAME || 'JoyFlix',
-      Announcement: process.env.ANNOUNCEMENT || '切勿分享本站，以维持使用体验哦 ʕ •ᴥ•ʔ～✰✰',
+      Announcement:
+        process.env.ANNOUNCEMENT || '切勿分享本站，以维持使用体验哦 ʕ •ᴥ•ʔ～✰✰',
       SearchDownstreamMaxPage:
         Number(process.env.NEXT_PUBLIC_SEARCH_MAX_PAGE) || 5,
       SiteInterfaceCacheTime: fileConfig.cache_time || 7200,
@@ -434,7 +438,7 @@ export async function resetConfig() {
             query: category.query,
             from: 'config',
             disabled: false,
-        })) || []
+          })) || []
         : [],
   } as AdminConfig;
 

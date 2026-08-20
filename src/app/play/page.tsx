@@ -20,6 +20,7 @@ import {
 } from '@/lib/db.client';
 import { SearchResult } from '@/lib/types';
 import { getVideoResolutionFromM3u8, processImageUrl } from '@/lib/utils';
+import { filterMarkedHlsAds } from '@/lib/filterMarkedHlsAds';
 
 import EpisodeSelector from '@/components/EpisodeSelector';
 import PageLayout from '@/components/PageLayout';
@@ -45,7 +46,8 @@ interface PlaybackRateSelector {
   html: string;
 }
 
-
+const AD_BLOCK_VALUE_KEY = 'enable_blockad';
+const AD_BLOCK_PREFERENCE_VERSION_KEY = 'joyflix_ad_block_preference_v2';
 
 function PlayPageClient() {
   const router = useRouter();
@@ -62,12 +64,12 @@ function PlayPageClient() {
     import('hls.js').then((hls) => setHls(() => hls.default));
   }, []);
   const [loading, setLoading] = useState(true);
-  const [loadingStage, setLoadingStage] = useState<'searching' | 'preferring' | 'fetching' | 'ready'>('searching');
+  const [loadingStage, setLoadingStage] = useState<
+    'searching' | 'preferring' | 'fetching' | 'ready'
+  >('searching');
   const [loadingMessage, setLoadingMessage] = useState('正在获取影片信息');
   const [error, setError] = useState<string | null>(null);
   const [detail, setDetail] = useState<SearchResult | null>(null);
-
-  
 
   // 跳过片头片尾配置
   const [skipConfig, setSkipConfig] = useState({
@@ -88,13 +90,27 @@ function PlayPageClient() {
   // 跳过检查的时间间隔控制
   const lastSkipCheckRef = useRef(0);
 
-  // 拦截广告开关（从 localStorage 继承，默认 true）
+  // Chỉ chặn những quảng cáo được playlist đánh dấu rõ. Mặc định tắt để
+  // không có khả năng lọc nhầm nội dung phim.
   const [blockAdEnabled, setBlockAdEnabled] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
-      const v = localStorage.getItem('enable_blockad');
-      if (v !== null) return v === 'true';
+      try {
+        const preferenceVersion = localStorage.getItem(
+          AD_BLOCK_PREFERENCE_VERSION_KEY
+        );
+        if (preferenceVersion === 'v2') {
+          return localStorage.getItem(AD_BLOCK_VALUE_KEY) === 'true';
+        }
+
+        // Bản cũ mặc định bật chặn quảng cáo. Chuyển một lần sang mặc định
+        // an toàn, sau đó mọi lần bật/tắt đều là lựa chọn rõ ràng của người xem.
+        localStorage.setItem(AD_BLOCK_VALUE_KEY, 'false');
+        localStorage.setItem(AD_BLOCK_PREFERENCE_VERSION_KEY, 'v2');
+      } catch (_error) {
+        // Nếu trình duyệt không cho dùng localStorage, vẫn ưu tiên phát mượt.
+      }
     }
-    return true;
+    return false;
   });
   const blockAdEnabledRef = useRef(blockAdEnabled);
   useEffect(() => {
@@ -187,10 +203,9 @@ function PlayPageClient() {
   });
 
   // 保存优选时的测速结果，避免EpisodeSelector重复测速
-  const [precomputedVideoInfo, setPrecomputedVideoInfo] = useState<Map<string, { quality: string; loadSpeed: string; pingTime: number }>>(new Map());
-
-  
-  
+  const [precomputedVideoInfo, setPrecomputedVideoInfo] = useState<
+    Map<string, { quality: string; loadSpeed: string; pingTime: number }>
+  >(new Map());
 
   // 路线加载状态
   const [isVideoLoading, setIsVideoLoading] = useState(true);
@@ -227,34 +242,44 @@ function PlayPageClient() {
     // 第一阶段：快速Ping测试
     console.log('开始第一阶段：快速Ping测试');
     const PING_THRESHOLD = 800; // 800毫秒
-    const pingPromises = sources.map(source => {
-        const episodeUrl = source.episodes?.[0];
-        if (!episodeUrl) return Promise.resolve({ source, ping: Infinity });
-        const start = performance.now();
-        // 使用HEAD请求以获得更准确的ping时间
-        return fetch(episodeUrl, { method: 'HEAD', mode: 'no-cors' })
-            .then(() => ({ source, ping: performance.now() - start }))
-            .catch(() => ({ source, ping: performance.now() - start })); // 如果HEAD请求失败（例如CORS），则回退到计时
+    const pingPromises = sources.map((source) => {
+      const episodeUrl = source.episodes?.[0];
+      if (!episodeUrl) return Promise.resolve({ source, ping: Infinity });
+      const start = performance.now();
+      // 使用HEAD请求以获得更准确的ping时间
+      return fetch(episodeUrl, { method: 'HEAD', mode: 'no-cors' })
+        .then(() => ({ source, ping: performance.now() - start }))
+        .catch(() => ({ source, ping: performance.now() - start })); // 如果HEAD请求失败（例如CORS），则回退到计时
     });
 
     const pingResults = await Promise.all(pingPromises);
     const survivingSources = pingResults
-        .filter(result => result.ping < PING_THRESHOLD)
-        .sort((a, b) => a.ping - b.ping)
-        .map(result => result.source);
+      .filter((result) => result.ping < PING_THRESHOLD)
+      .sort((a, b) => a.ping - b.ping)
+      .map((result) => result.source);
 
-    console.log(`第一阶段完成: ${survivingSources.length} / ${sources.length} 个源通过Ping测试.`);
+    console.log(
+      `第一阶段完成: ${survivingSources.length} / ${sources.length} 个源通过Ping测试.`
+    );
 
     if (survivingSources.length === 0) {
-        console.warn('没有源通过Ping测试，将使用第一个原始源作为备用。');
-        return sources[0];
+      console.warn('没有源通过Ping测试，将使用第一个原始源作为备用。');
+      return sources[0];
     }
     if (survivingSources.length === 1) {
-        return survivingSources[0];
+      return survivingSources[0];
     }
 
     // 第二阶段：对通过的源进行完整测试
-    const allResults: Array<{ source: SearchResult; testResult: { quality: string; loadSpeed: string; pingTime: number; speedJitter: number; } } | null> = [];
+    const allResults: Array<{
+      source: SearchResult;
+      testResult: {
+        quality: string;
+        loadSpeed: string;
+        pingTime: number;
+        speedJitter: number;
+      };
+    } | null> = [];
 
     const testSource = async (source: SearchResult) => {
       try {
@@ -273,14 +298,14 @@ function PlayPageClient() {
       }
     };
 
-      // 并行测速逻辑
-      console.log('开始第二阶段：完整测速（并行分批）');
-      const batchSize = Math.ceil(survivingSources.length / 2);
-      for (let start = 0; start < survivingSources.length; start += batchSize) {
-          const batchSources = survivingSources.slice(start, start + batchSize);
-          const batchResults = await Promise.all(batchSources.map(testSource));
-          allResults.push(...batchResults);
-      }
+    // 并行测速逻辑
+    console.log('开始第二阶段：完整测速（并行分批）');
+    const batchSize = Math.ceil(survivingSources.length / 2);
+    for (let start = 0; start < survivingSources.length; start += batchSize) {
+      const batchSources = survivingSources.slice(start, start + batchSize);
+      const batchResults = await Promise.all(batchSources.map(testSource));
+      allResults.push(...batchResults);
+    }
 
     const newVideoInfoMap = new Map<string, any>();
     allResults.forEach((result) => {
@@ -290,7 +315,15 @@ function PlayPageClient() {
       }
     });
 
-    const successfulResults = allResults.filter(Boolean) as Array<{ source: SearchResult; testResult: { quality: string; loadSpeed: string; pingTime: number; speedJitter: number; } }>;
+    const successfulResults = allResults.filter(Boolean) as Array<{
+      source: SearchResult;
+      testResult: {
+        quality: string;
+        loadSpeed: string;
+        pingTime: number;
+        speedJitter: number;
+      };
+    }>;
 
     setPrecomputedVideoInfo(newVideoInfoMap);
 
@@ -312,11 +345,15 @@ function PlayPageClient() {
 
     const maxSpeed = validSpeeds.length > 0 ? Math.max(...validSpeeds) : 1024;
 
-    const validPings = successfulResults.map(r => r.testResult.pingTime).filter(p => p > 0);
+    const validPings = successfulResults
+      .map((r) => r.testResult.pingTime)
+      .filter((p) => p > 0);
     const minPing = validPings.length > 0 ? Math.min(...validPings) : 50;
     const maxPing = validPings.length > 0 ? Math.max(...validPings) : 1000;
 
-    const validJitters = successfulResults.map(r => r.testResult.speedJitter).filter(j => j > 0);
+    const validJitters = successfulResults
+      .map((r) => r.testResult.speedJitter)
+      .filter((j) => j > 0);
     const maxJitter = validJitters.length > 0 ? Math.max(...validJitters) : 500;
 
     const resultsWithScore = successfulResults.map((result) => ({
@@ -335,7 +372,13 @@ function PlayPageClient() {
     console.log('播放源评分排序结果:');
     resultsWithScore.forEach((result, index) => {
       console.log(
-        `${index + 1}. ${result.source.source_name} - 评分: ${result.score.toFixed(2)} (画质: ${result.testResult.quality}, 速度: ${result.testResult.loadSpeed}, 延迟: ${result.testResult.pingTime}ms, 抖动: ${result.testResult.speedJitter.toFixed(2)}KB/s)`
+        `${index + 1}. ${
+          result.source.source_name
+        } - 评分: ${result.score.toFixed(2)} (画质: ${
+          result.testResult.quality
+        }, 速度: ${result.testResult.loadSpeed}, 延迟: ${
+          result.testResult.pingTime
+        }ms, 抖动: ${result.testResult.speedJitter.toFixed(2)}KB/s)`
       );
     });
 
@@ -360,38 +403,50 @@ function PlayPageClient() {
     // --- 1. 分辨率评分 (权重: 30%) ---
     let qualityScore = (() => {
       switch (testResult.quality) {
-        case '4K': return 100;
-        case '2K': return 90;
-        case '1080P': return 75;
-        case '720P': return 50;
-        case '480P': return 25;
-        case 'SD': return 10;
-        default: return 0;
+        case '4K':
+          return 100;
+        case '2K':
+          return 90;
+        case '1080P':
+          return 75;
+        case '720P':
+          return 50;
+        case '480P':
+          return 25;
+        case 'SD':
+          return 10;
+        default:
+          return 0;
       }
     })();
 
     // --- 关联性判断: 速度是否支撑画质 ---
-    const requiredSpeed: { [quality: string]: number } = { // 单位 KB/s
-        '4K': 2500,    // 20 Mbps
-        '2K': 1875,    // 15 Mbps
-        '1080P': 1000, // 8 Mbps
-        '720P': 500,   // 4 Mbps
+    const requiredSpeed: { [quality: string]: number } = {
+      // 单位 KB/s
+      '4K': 2500, // 20 Mbps
+      '2K': 1875, // 15 Mbps
+      '1080P': 1000, // 8 Mbps
+      '720P': 500, // 4 Mbps
     };
     const speedStr = testResult.loadSpeed;
     const match = speedStr.match(/^([\d.]+)\s*(KB\/s|MB\/s)$/);
     let speedKBps = 0;
     if (match) {
-        const value = parseFloat(match[1]);
-        speedKBps = match[2] === 'MB/s' ? value * 1024 : value;
+      const value = parseFloat(match[1]);
+      speedKBps = match[2] === 'MB/s' ? value * 1024 : value;
     }
 
     const required = requiredSpeed[testResult.quality];
     if (required && speedKBps > 0 && speedKBps < required) {
-        // 如果速度不足以支撑画质，画质分大打折扣
-        qualityScore *= 0.3; // 仅获得30%的画质分
-        console.log(`  - ${testResult.quality}速度不足(${speedKBps.toFixed(0)}KB/s < ${required}KB/s)，画质分被惩罚.`);
+      // 如果速度不足以支撑画质，画质分大打折扣
+      qualityScore *= 0.3; // 仅获得30%的画质分
+      console.log(
+        `  - ${testResult.quality}速度不足(${speedKBps.toFixed(
+          0
+        )}KB/s < ${required}KB/s)，画质分被惩罚.`
+      );
     }
-    score += qualityScore * 0.30;
+    score += qualityScore * 0.3;
 
     // --- 2. 下载速度评分 (权重: 40%) ---
     const speedScore = (() => {
@@ -401,7 +456,7 @@ function PlayPageClient() {
       const x0 = 2500; // 2.5 MB/s
       return 100 / (1 + Math.exp(-k * (speedKBps - x0)));
     })();
-    score += speedScore * 0.40;
+    score += speedScore * 0.4;
 
     // --- 3. 网络延迟评分 (权重: 10%) ---
     const pingScore = (() => {
@@ -411,31 +466,35 @@ function PlayPageClient() {
       const pingRatio = (maxPing - ping) / (maxPing - minPing);
       return Math.min(100, Math.max(0, pingRatio * 100));
     })();
-    score += pingScore * 0.10;
+    score += pingScore * 0.1;
 
     // --- 4. 稳定性评分 (权重: 20%) ---
     const jitterScore = (() => {
-        if (testResult.speedJitter <= 0 || maxJitter <= 0) return 100; // 没有抖动或无法计算则为满分
-        // 抖动越小越好，线性反向评分
-        const jitterRatio = testResult.speedJitter / maxJitter;
-        return 100 * (1 - Math.min(1, jitterRatio));
+      if (testResult.speedJitter <= 0 || maxJitter <= 0) return 100; // 没有抖动或无法计算则为满分
+      // 抖动越小越好，线性反向评分
+      const jitterRatio = testResult.speedJitter / maxJitter;
+      return 100 * (1 - Math.min(1, jitterRatio));
     })();
-    score += jitterScore * 0.20;
+    score += jitterScore * 0.2;
 
     // --- 惩罚机制: 平滑延迟惩罚 ---
     const pingPenalty = (() => {
-        const ping = testResult.pingTime;
-        const goodPing = 150; // 150毫秒
-        const badPing = 600; // 600毫秒
-        if (ping <= goodPing) return 1.0; // 无惩罚
-        if (ping >= badPing) return 0.7; // 最大惩罚 (30%)
-        // 在[150, 600]区间内线性惩罚
-        const penaltyFactor = (ping - goodPing) / (badPing - goodPing);
-        return 1.0 - (penaltyFactor * 0.3);
+      const ping = testResult.pingTime;
+      const goodPing = 150; // 150毫秒
+      const badPing = 600; // 600毫秒
+      if (ping <= goodPing) return 1.0; // 无惩罚
+      if (ping >= badPing) return 0.7; // 最大惩罚 (30%)
+      // 在[150, 600]区间内线性惩罚
+      const penaltyFactor = (ping - goodPing) / (badPing - goodPing);
+      return 1.0 - penaltyFactor * 0.3;
     })();
     if (pingPenalty < 1.0) {
-        console.log(`  - 延迟(${testResult.pingTime}ms)触发平滑惩罚，分数乘以${pingPenalty.toFixed(2)}`);
-        score *= pingPenalty;
+      console.log(
+        `  - 延迟(${
+          testResult.pingTime
+        }ms)触发平滑惩罚，分数乘以${pingPenalty.toFixed(2)}`
+      );
+      score *= pingPenalty;
     }
 
     return Math.max(0, score); // 确保分数不为负
@@ -566,282 +625,331 @@ function PlayPageClient() {
    * @param {string|null} regexFilter - 可选的正则过滤规则
    * @return {string} 过滤后的完整M3U8内容
    */
-  function SuperFilterAdsFromM3U8(m3u8Content: string, regexFilter: string | null = null): string {
-      if (!m3u8Content) return '';
-      
-      // ==================== 第一阶段：预处理 ====================
-      // 1. 正则过滤
-      const processedContent = regexFilter 
-          ? applyRegexFilter(m3u8Content, regexFilter) 
-          : m3u8Content;
-      
-      // 2. 解析M3U8结构
-      const { segments, headers } = parseM3U8Structure(processedContent);
-      if (segments.length === 0) return processedContent;
-      
-      // ==================== 第二阶段：科学分析 ====================
-      // 1. 计算基础统计量
-      const stats = calculateSegmentStats(segments);
-      
-      // 2. 多维度广告检测
-      const analyzedSegments = analyzeSegmentsForAds(segments, stats);
-      
-      // 3. 智能过滤决策
-      const filteredSegments = applyFilterDecision(analyzedSegments, stats);
-      
-      // ==================== 第三阶段：重建M3U8 ====================
-      return rebuildM3U8(headers, filteredSegments, processedContent);
+  function SuperFilterAdsFromM3U8(
+    m3u8Content: string,
+    regexFilter: string | null = null
+  ): string {
+    if (!m3u8Content) return '';
+
+    // ==================== 第一阶段：预处理 ====================
+    // 1. 正则过滤
+    const processedContent = regexFilter
+      ? applyRegexFilter(m3u8Content, regexFilter)
+      : m3u8Content;
+
+    // 2. 解析M3U8结构
+    const { segments, headers } = parseM3U8Structure(processedContent);
+    if (segments.length === 0) return processedContent;
+
+    // ==================== 第二阶段：科学分析 ====================
+    // 1. 计算基础统计量
+    const stats = calculateSegmentStats(segments);
+
+    // 2. 多维度广告检测
+    const analyzedSegments = analyzeSegmentsForAds(segments, stats);
+
+    // 3. 智能过滤决策
+    const filteredSegments = applyFilterDecision(analyzedSegments, stats);
+
+    // ==================== 第三阶段：重建M3U8 ====================
+    return rebuildM3U8(headers, filteredSegments, processedContent);
   }
 
   /**
    * 应用正则过滤
    */
   function applyRegexFilter(content: string, regexFilter: string): string {
-      try {
-          const regex = new RegExp(regexFilter, 'gi');
-          return content.replace(regex, '');
-      } catch (e) {
-          console.warn('正则过滤失败:', e);
-          return content;
-      }
+    try {
+      const regex = new RegExp(regexFilter, 'gi');
+      return content.replace(regex, '');
+    } catch (e) {
+      console.warn('正则过滤失败:', e);
+      return content;
+    }
   }
 
   /**
    * 深度解析M3U8结构
    */
-  function parseM3U8Structure(content: string): { segments: M3U8Segment[], headers: M3U8Headers } {
-      const lines = content.split('\n');
-      const segments: M3U8Segment[] = [];
-      const headers: M3U8Headers = {
-          main: [],
-          other: []
-      };
-      let currentDiscontinuity = false;
-      let currentMap: string | null = null;
-      let segmentIndex = 0;
+  function parseM3U8Structure(content: string): {
+    segments: M3U8Segment[];
+    headers: M3U8Headers;
+  } {
+    const lines = content.split('\n');
+    const segments: M3U8Segment[] = [];
+    const headers: M3U8Headers = {
+      main: [],
+      other: [],
+    };
+    let currentDiscontinuity = false;
+    let currentMap: string | null = null;
+    let segmentIndex = 0;
 
-      for (let i = 0; i < lines.length; i++) {
-          const line = lines[i].trim();
-          
-          if (i < 10 && line.startsWith('#EXT')) {
-              headers.main.push(line);
-              continue;
-          }
-          
-          if (line.startsWith('#EXT-X-MAP:')) {
-              currentMap = line;
-              continue;
-          }
-          
-          if (line.includes('#EXT-X-DISCONTINUITY')) {
-              currentDiscontinuity = true;
-              continue;
-          }
-          
-          if (line.startsWith('#EXTINF:')) {
-              const durationMatch = line.match(/#EXTINF:([\d.]+)/);
-              if (durationMatch && lines[i + 1] && !lines[i + 1].startsWith('#')) {
-                  const duration = parseFloat(durationMatch[1]);
-                  const url = lines[i + 1].trim();
-                  
-                  segments.push({
-                      index: segmentIndex++,
-                      startLine: i,
-                      endLine: i + 1,
-                      duration,
-                      url,
-                      hasDiscontinuity: currentDiscontinuity,
-                      hasMap: currentMap !== null,
-                      content: currentMap 
-                          ? [currentMap, line, lines[i + 1]].join('\n')
-                          : [line, lines[i + 1]].join('\n'),
-                      isAd: false,
-                      adScore: 0
-                  });
-                  
-                  currentDiscontinuity = false;
-                  currentMap = null;
-                  i++;
-              }
-          } else if (line.startsWith('#')) {
-              headers.other.push(line);
-          }
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+
+      if (i < 10 && line.startsWith('#EXT')) {
+        headers.main.push(line);
+        continue;
       }
-      
-      return { segments, headers };
+
+      if (line.startsWith('#EXT-X-MAP:')) {
+        currentMap = line;
+        continue;
+      }
+
+      if (line.includes('#EXT-X-DISCONTINUITY')) {
+        currentDiscontinuity = true;
+        continue;
+      }
+
+      if (line.startsWith('#EXTINF:')) {
+        const durationMatch = line.match(/#EXTINF:([\d.]+)/);
+        if (durationMatch && lines[i + 1] && !lines[i + 1].startsWith('#')) {
+          const duration = parseFloat(durationMatch[1]);
+          const url = lines[i + 1].trim();
+
+          segments.push({
+            index: segmentIndex++,
+            startLine: i,
+            endLine: i + 1,
+            duration,
+            url,
+            hasDiscontinuity: currentDiscontinuity,
+            hasMap: currentMap !== null,
+            content: currentMap
+              ? [currentMap, line, lines[i + 1]].join('\n')
+              : [line, lines[i + 1]].join('\n'),
+            isAd: false,
+            adScore: 0,
+          });
+
+          currentDiscontinuity = false;
+          currentMap = null;
+          i++;
+        }
+      } else if (line.startsWith('#')) {
+        headers.other.push(line);
+      }
+    }
+
+    return { segments, headers };
   }
 
   /**
    * 计算高级统计量
    */
   function calculateSegmentStats(segments: M3U8Segment[]): M3U8Stats {
-      const durations = segments.map(s => s.duration);
-      if (durations.length === 0) {
-        return { avgDuration: 0, stdDev: 0, p10: 0, p90: 0, totalDuration: 0, segmentCount: 0, durationRange: [0, 0] };
-      }
-      const totalDuration = durations.reduce((sum, d) => sum + d, 0);
-      const avgDuration = totalDuration / durations.length;
-      
-      const squaredDiffs = durations.map(d => Math.pow(d - avgDuration, 2));
-      const stdDev = Math.sqrt(squaredDiffs.reduce((sum, sd) => sum + sd, 0) / durations.length);
-      
-      const sortedDurations = [...durations].sort((a, b) => a - b);
-      const p10 = sortedDurations[Math.floor(durations.length * 0.1)] || 0;
-      const p90 = sortedDurations[Math.floor(durations.length * 0.9)] || 0;
-      
+    const durations = segments.map((s) => s.duration);
+    if (durations.length === 0) {
       return {
-          avgDuration,
-          stdDev,
-          p10,
-          p90,
-          totalDuration,
-          segmentCount: segments.length,
-          durationRange: [sortedDurations[0] || 0, sortedDurations[sortedDurations.length - 1] || 0]
+        avgDuration: 0,
+        stdDev: 0,
+        p10: 0,
+        p90: 0,
+        totalDuration: 0,
+        segmentCount: 0,
+        durationRange: [0, 0],
       };
+    }
+    const totalDuration = durations.reduce((sum, d) => sum + d, 0);
+    const avgDuration = totalDuration / durations.length;
+
+    const squaredDiffs = durations.map((d) => Math.pow(d - avgDuration, 2));
+    const stdDev = Math.sqrt(
+      squaredDiffs.reduce((sum, sd) => sum + sd, 0) / durations.length
+    );
+
+    const sortedDurations = [...durations].sort((a, b) => a - b);
+    const p10 = sortedDurations[Math.floor(durations.length * 0.1)] || 0;
+    const p90 = sortedDurations[Math.floor(durations.length * 0.9)] || 0;
+
+    return {
+      avgDuration,
+      stdDev,
+      p10,
+      p90,
+      totalDuration,
+      segmentCount: segments.length,
+      durationRange: [
+        sortedDurations[0] || 0,
+        sortedDurations[sortedDurations.length - 1] || 0,
+      ],
+    };
   }
 
   /**
    * 多维度片段分析
    */
-  function analyzeSegmentsForAds(segments: M3U8Segment[], stats: M3U8Stats): M3U8Segment[] {
-      const { avgDuration, stdDev, p10, p90 } = stats;
-      
-      return segments.map(segment => {
-          const deviation = Math.abs(segment.duration - avgDuration);
-          const zScore = stdDev > 0 ? deviation / stdDev : 0;
-          
-          const durationAbnormality = Math.min(1, zScore / 3);
-          
-          let positionFactor = 0;
-          if (segment.index < 3 && segment.duration < p10) {
-              positionFactor = 0.8;
-          } else if (segment.index > segments.length - 3 && segment.duration < p10) {
-              positionFactor = 0.5;
-          }
-          
-          const discontinuityFactor = segment.hasDiscontinuity ? 0.3 : 0;
-          
-          const adScore = Math.min(1, 
-              (durationAbnormality * 0.6) + 
-              (positionFactor * 0.3) + 
-              (discontinuityFactor * 0.1)
-          );
-          
-          return {
-              ...segment,
-              adScore,
-              isAd: adScore > 0.65,
-              stats: { deviation, zScore }
-          };
-      });
+  function analyzeSegmentsForAds(
+    segments: M3U8Segment[],
+    stats: M3U8Stats
+  ): M3U8Segment[] {
+    const { avgDuration, stdDev, p10, p90 } = stats;
+
+    return segments.map((segment) => {
+      const deviation = Math.abs(segment.duration - avgDuration);
+      const zScore = stdDev > 0 ? deviation / stdDev : 0;
+
+      const durationAbnormality = Math.min(1, zScore / 3);
+
+      let positionFactor = 0;
+      if (segment.index < 3 && segment.duration < p10) {
+        positionFactor = 0.8;
+      } else if (
+        segment.index > segments.length - 3 &&
+        segment.duration < p10
+      ) {
+        positionFactor = 0.5;
+      }
+
+      const discontinuityFactor = segment.hasDiscontinuity ? 0.3 : 0;
+
+      const adScore = Math.min(
+        1,
+        durationAbnormality * 0.6 +
+          positionFactor * 0.3 +
+          discontinuityFactor * 0.1
+      );
+
+      return {
+        ...segment,
+        adScore,
+        isAd: adScore > 0.65,
+        stats: { deviation, zScore },
+      };
+    });
   }
 
   /**
    * 智能过滤决策
    */
-  function applyFilterDecision(segments: M3U8Segment[], stats: M3U8Stats): M3U8Segment[] {
-      const { avgDuration, stdDev } = stats;
-      
-      const baseThreshold = 0.65;
-      const dynamicThreshold = (avgDuration > 0 && stdDev > 0) 
-        ? Math.min(0.8, Math.max(0.5, baseThreshold - (stdDev / avgDuration) * 0.2))
+  function applyFilterDecision(
+    segments: M3U8Segment[],
+    stats: M3U8Stats
+  ): M3U8Segment[] {
+    const { avgDuration, stdDev } = stats;
+
+    const baseThreshold = 0.65;
+    const dynamicThreshold =
+      avgDuration > 0 && stdDev > 0
+        ? Math.min(
+            0.8,
+            Math.max(0.5, baseThreshold - (stdDev / avgDuration) * 0.2)
+          )
         : baseThreshold;
-      
-      return segments.filter(segment => {
-          if (segment.isAd && segment.adScore > dynamicThreshold) {
-              return false;
-          }
-          
-          if (segment.duration < 1.0 && segment.index > 3) {
-              return false;
-          }
-          
-          if (segment.hasMap) {
-              return true;
-          }
-          
-          return true;
-      });
+
+    return segments.filter((segment) => {
+      if (segment.isAd && segment.adScore > dynamicThreshold) {
+        return false;
+      }
+
+      if (segment.duration < 1.0 && segment.index > 3) {
+        return false;
+      }
+
+      if (segment.hasMap) {
+        return true;
+      }
+
+      return true;
+    });
   }
 
   /**
    * 完美重建M3U8
    */
-  function rebuildM3U8(headers: M3U8Headers, segments: M3U8Segment[], originalContent: string): string {
-      const originalLines = originalContent.split('\n');
-      const keepLines = new Set<number>();
-      
-      headers.main.forEach((_, i) => {
-        if (i < originalLines.length) keepLines.add(i)
-      });
-      
-      segments.forEach(segment => {
-          for (let i = segment.startLine; i <= segment.endLine; i++) {
-              keepLines.add(i);
-          }
-      });
-      
-      const criticalTags = [
-          '#EXT-X-VERSION',
-          '#EXT-X-TARGETDURATION',
-          '#EXT-X-MEDIA-SEQUENCE',
-          '#EXT-X-PLAYLIST-TYPE',
-          '#EXT-X-ENDLIST'
-      ];
-      
-      for (let i = 0; i < originalLines.length; i++) {
-          const line = originalLines[i].trim();
-          if (criticalTags.some(tag => line.startsWith(tag))) {
-              keepLines.add(i);
-          }
+  function rebuildM3U8(
+    headers: M3U8Headers,
+    segments: M3U8Segment[],
+    originalContent: string
+  ): string {
+    const originalLines = originalContent.split('\n');
+    const keepLines = new Set<number>();
+
+    headers.main.forEach((_, i) => {
+      if (i < originalLines.length) keepLines.add(i);
+    });
+
+    segments.forEach((segment) => {
+      for (let i = segment.startLine; i <= segment.endLine; i++) {
+        keepLines.add(i);
       }
-      
-      const filteredLines = originalLines.filter((_, i) => keepLines.has(i));
-      
-      updateM3U8Headers(filteredLines, segments);
-      
-      return filteredLines.join('\n');
+    });
+
+    const criticalTags = [
+      '#EXT-X-VERSION',
+      '#EXT-X-TARGETDURATION',
+      '#EXT-X-MEDIA-SEQUENCE',
+      '#EXT-X-PLAYLIST-TYPE',
+      '#EXT-X-ENDLIST',
+    ];
+
+    for (let i = 0; i < originalLines.length; i++) {
+      const line = originalLines[i].trim();
+      if (criticalTags.some((tag) => line.startsWith(tag))) {
+        keepLines.add(i);
+      }
+    }
+
+    const filteredLines = originalLines.filter((_, i) => keepLines.has(i));
+
+    updateM3U8Headers(filteredLines, segments);
+
+    return filteredLines.join('\n');
   }
 
   /**
    * 更新M3U8头部信息
    */
   function updateM3U8Headers(lines: string[], segments: M3U8Segment[]) {
-      if (segments.length === 0) return;
-      
-      const maxDuration = Math.max(...segments.map(s => s.duration));
-      let targetDurationUpdated = false;
-      for (let i = 0; i < lines.length; i++) {
-          if (lines[i].startsWith('#EXT-X-TARGETDURATION')) {
-              lines[i] = `#EXT-X-TARGETDURATION:${Math.ceil(maxDuration)}`;
-              targetDurationUpdated = true;
-              break;
-          }
-      }
+    if (segments.length === 0) return;
 
-      if (!targetDurationUpdated) {
-        const versionIndex = lines.findIndex(line => line.startsWith('#EXT-X-VERSION'));
-        if (versionIndex !== -1) {
-          lines.splice(versionIndex + 1, 0, `#EXT-X-TARGETDURATION:${Math.ceil(maxDuration)}`);
+    const maxDuration = Math.max(...segments.map((s) => s.duration));
+    let targetDurationUpdated = false;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].startsWith('#EXT-X-TARGETDURATION')) {
+        lines[i] = `#EXT-X-TARGETDURATION:${Math.ceil(maxDuration)}`;
+        targetDurationUpdated = true;
+        break;
+      }
+    }
+
+    if (!targetDurationUpdated) {
+      const versionIndex = lines.findIndex((line) =>
+        line.startsWith('#EXT-X-VERSION')
+      );
+      if (versionIndex !== -1) {
+        lines.splice(
+          versionIndex + 1,
+          0,
+          `#EXT-X-TARGETDURATION:${Math.ceil(maxDuration)}`
+        );
+      }
+    }
+
+    if (segments.length > 0 && segments[0].index > 0) {
+      let mediaSequenceUpdated = false;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].startsWith('#EXT-X-MEDIA-SEQUENCE')) {
+          lines[i] = `#EXT-X-MEDIA-SEQUENCE:${segments[0].index}`;
+          mediaSequenceUpdated = true;
+          break;
         }
       }
-      
-      if (segments.length > 0 && segments[0].index > 0) {
-          let mediaSequenceUpdated = false;
-          for (let i = 0; i < lines.length; i++) {
-              if (lines[i].startsWith('#EXT-X-MEDIA-SEQUENCE')) {
-                  lines[i] = `#EXT-X-MEDIA-SEQUENCE:${segments[0].index}`;
-                  mediaSequenceUpdated = true;
-                  break;
-              }
-          }
-          if (!mediaSequenceUpdated) {
-            const targetDurationIndex = lines.findIndex(line => line.startsWith('#EXT-X-TARGETDURATION'));
-            if (targetDurationIndex !== -1) {
-              lines.splice(targetDurationIndex + 1, 0, `#EXT-X-MEDIA-SEQUENCE:${segments[0].index}`);
-            }
-          }
+      if (!mediaSequenceUpdated) {
+        const targetDurationIndex = lines.findIndex((line) =>
+          line.startsWith('#EXT-X-TARGETDURATION')
+        );
+        if (targetDurationIndex !== -1) {
+          lines.splice(
+            targetDurationIndex + 1,
+            0,
+            `#EXT-X-MEDIA-SEQUENCE:${segments[0].index}`
+          );
+        }
       }
+    }
   }
 
   // 高级 M3U8 过滤的辅助函数
@@ -858,7 +966,9 @@ function PlayPageClient() {
     if (s.length === 0) return t.length;
     if (t.length === 0) return s.length;
 
-    const distanceMatrix: number[][] = Array(t.length + 1).fill(null).map(() => Array(s.length + 1).fill(null as any));
+    const distanceMatrix: number[][] = Array(t.length + 1)
+      .fill(null)
+      .map(() => Array(s.length + 1).fill(null as any));
 
     for (let i = 0; i <= s.length; i += 1) {
       distanceMatrix[0][i] = i;
@@ -956,11 +1066,18 @@ function PlayPageClient() {
         const current_uri_path = uri_path_match[0];
         if (last_uri_path !== '') {
           const distance = levenshteinDistance(current_uri_path, last_uri_path);
-          if (max_distance !== 0 && max_distance < 10 && distance > max_distance) {
+          if (
+            max_distance !== 0 &&
+            max_distance < 10 &&
+            distance > max_distance
+          ) {
             // 此片段很可能是广告，跳过它
             // 查找下一个 #EXT-X-DISCONTINUITY 或文件末尾
             let j = i;
-            while (j < lines.length && !lines[j].startsWith('#EXT-X-DISCONTINUITY')) {
+            while (
+              j < lines.length &&
+              !lines[j].startsWith('#EXT-X-DISCONTINUITY')
+            ) {
               j++;
             }
             i = j - 1; // 将 i 设置为下一个不连续点或文件末尾之前的行
@@ -970,23 +1087,33 @@ function PlayPageClient() {
           n += 1;
         }
         last_uri_path = current_uri_path;
-        if (levenshteinDistance(current_uri_path, last_uri_path) > max_distance) {
+        if (
+          levenshteinDistance(current_uri_path, last_uri_path) > max_distance
+        ) {
           max_distance = levenshteinDistance(current_uri_path, last_uri_path);
         }
       }
 
-
       if (ts_type === 0) {
-        if (line.startsWith('#EXT-X-DISCONTINUITY') && lines[i + 1] && lines[i + 2]) {
+        if (
+          line.startsWith('#EXT-X-DISCONTINUITY') &&
+          lines[i + 1] &&
+          lines[i + 2]
+        ) {
           if (i > 0 && lines[i - 1].startsWith('#EXT-X-')) {
             result.push(line);
             continue;
-          }
-          else {
+          } else {
             let the_ts_name_len_current = lines[i + 2].indexOf('.ts');
             if (the_ts_name_len_current > 0) {
-              if (Math.abs(the_ts_name_len_current - ts_name_len) > ts_name_len_extend) {
-                if (lines[i + 3] && lines[i + 3].startsWith('#EXT-X-DISCONTINUITY')) {
+              if (
+                Math.abs(the_ts_name_len_current - ts_name_len) >
+                ts_name_len_extend
+              ) {
+                if (
+                  lines[i + 3] &&
+                  lines[i + 3].startsWith('#EXT-X-DISCONTINUITY')
+                ) {
                   i += 3;
                 } else {
                   i += 2;
@@ -997,8 +1124,14 @@ function PlayPageClient() {
               }
 
               let the_ts_name_index = extract_number_before_ts(lines[i + 2]);
-              if (the_ts_name_index !== null && the_ts_name_index !== prev_ts_name_index + 1) {
-                if (lines[i + 3] && lines[i + 3].startsWith('#EXT-X-DISCONTINUITY')) {
+              if (
+                the_ts_name_index !== null &&
+                the_ts_name_index !== prev_ts_name_index + 1
+              ) {
+                if (
+                  lines[i + 3] &&
+                  lines[i + 3].startsWith('#EXT-X-DISCONTINUITY')
+                ) {
                   i += 3;
                 } else {
                   i += 2;
@@ -1015,8 +1148,14 @@ function PlayPageClient() {
         if (line.startsWith('#EXTINF') && lines[i + 1]) {
           let the_ts_name_len_current = lines[i + 1].indexOf('.ts');
           if (the_ts_name_len_current > 0) {
-            if (Math.abs(the_ts_name_len_current - ts_name_len) > ts_name_len_extend) {
-              if (lines[i + 2] && lines[i + 2].startsWith('#EXT-X-DISCONTINUITY')) {
+            if (
+              Math.abs(the_ts_name_len_current - ts_name_len) >
+              ts_name_len_extend
+            ) {
+              if (
+                lines[i + 2] &&
+                lines[i + 2].startsWith('#EXT-X-DISCONTINUITY')
+              ) {
                 i += 2;
               } else {
                 i += 1;
@@ -1031,7 +1170,10 @@ function PlayPageClient() {
               if (the_ts_name_index === prev_ts_name_index + 1) {
                 prev_ts_name_index++;
               } else {
-                if (lines[i + 2] && lines[i + 2].startsWith('#EXT-X-DISCONTINUITY')) {
+                if (
+                  lines[i + 2] &&
+                  lines[i + 2].startsWith('#EXT-X-DISCONTINUITY')
+                ) {
                   i += 2;
                 } else {
                   i += 1;
@@ -1043,7 +1185,11 @@ function PlayPageClient() {
         }
       } else if (ts_type === 1) {
         if (line.startsWith('#EXTINF')) {
-          if (line === first_extinf_row && the_same_extinf_name_n <= the_extinf_benchmark_n && the_ext_x_mode === 0) {
+          if (
+            line === first_extinf_row &&
+            the_same_extinf_name_n <= the_extinf_benchmark_n &&
+            the_ext_x_mode === 0
+          ) {
             the_same_extinf_name_n++;
           } else {
             the_ext_x_mode = 1;
@@ -1059,13 +1205,24 @@ function PlayPageClient() {
             result.push(line);
             continue;
           } else {
-            if (lines[i + 1] && lines[i + 1].startsWith('#EXTINF') && lines[i + 2] && lines[i + 2].indexOf('.ts') > 0) {
+            if (
+              lines[i + 1] &&
+              lines[i + 1].startsWith('#EXTINF') &&
+              lines[i + 2] &&
+              lines[i + 2].indexOf('.ts') > 0
+            ) {
               let the_ext_x_discontinuity_condition_flag = false;
               if (the_ext_x_mode === 1) {
-                the_ext_x_discontinuity_condition_flag = lines[i + 1] !== first_extinf_row && the_same_extinf_name_n > the_extinf_benchmark_n;
+                the_ext_x_discontinuity_condition_flag =
+                  lines[i + 1] !== first_extinf_row &&
+                  the_same_extinf_name_n > the_extinf_benchmark_n;
               }
 
-              if (lines[i + 3] && lines[i + 3].startsWith('#EXT-X-DISCONTINUITY') && the_ext_x_discontinuity_condition_flag) {
+              if (
+                lines[i + 3] &&
+                lines[i + 3].startsWith('#EXT-X-DISCONTINUITY') &&
+                the_ext_x_discontinuity_condition_flag
+              ) {
                 i += 3;
               } else {
               }
@@ -1073,7 +1230,8 @@ function PlayPageClient() {
             }
           }
         }
-      } else { // ts_type === 2 (暴力模式)
+      } else {
+        // ts_type === 2 (暴力模式)
         if (line.startsWith('#EXT-X-DISCONTINUITY')) {
           if (i > 0 && lines[i - 1].startsWith('#EXT-X-PLAYLIST-TYPE')) {
             result.push(line);
@@ -1090,17 +1248,10 @@ function PlayPageClient() {
     return result.join('\n');
   }
 
-  // 现有 filterAdsFromM3U8 函数，现在调用高级逻辑
+  // Chỉ bỏ segment nằm giữa cặp nhãn quảng cáo rõ ràng của HLS. Không được
+  // suy đoán từ tên, độ dài segment hoặc EXT-X-DISCONTINUITY.
   function filterAdsFromM3U8(m3u8Content: string): string {
-    if (!m3u8Content) return '';
-    
-    // 首先，应用现有的广告过滤逻辑
-    const partiallyFiltered = advancedFilterM3U8Lines(m3u8Content);
-    
-    // 然后，应用新的、更智能的广告过滤逻辑
-    const fullyFiltered = SuperFilterAdsFromM3U8(partiallyFiltered);
-    
-    return fullyFiltered;
+    return filterMarkedHlsAds(m3u8Content);
   }
 
   // 跳过片头片尾配置相关函数
@@ -1158,7 +1309,10 @@ function PlayPageClient() {
               : `-${formatTime(-skipConfigRef.current.outro_time)}`,
           onClick: function () {
             const outroTime =
-              -(artPlayerRef.current?.duration - artPlayerRef.current?.currentTime) || 0;
+              -(
+                artPlayerRef.current?.duration -
+                artPlayerRef.current?.currentTime
+              ) || 0;
             if (outroTime < 0) {
               const newConfig = {
                 ...skipConfigRef.current,
@@ -1201,8 +1355,6 @@ function PlayPageClient() {
         .padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
     }
   };
-
-  
 
   // 当集数索引变化时自动更新视频地址
   useEffect(() => {
@@ -1276,9 +1428,7 @@ function PlayPageClient() {
       setLoading(true);
       setLoadingStage(currentSource && currentId ? 'fetching' : 'searching');
       setLoadingMessage(
-        currentSource && currentId
-          ? '正在获取影片信息'
-          : '正在获取影片信息'
+        currentSource && currentId ? '正在获取影片信息' : '正在获取影片信息'
       );
 
       let sourcesInfo = await fetchSourcesData(searchTitle || videoTitle);
@@ -1751,14 +1901,12 @@ function PlayPageClient() {
     };
   }, []);
 
-  
-
   function getPlaybackRateSelector(): PlaybackRateSelector[] {
     const rates = [2.0, 1.5, 1.25, 1.0, 0.75, 0.5];
-    return rates.map(rate => ({
+    return rates.map((rate) => ({
       name: `${rate}x`,
       value: rate,
-      html: `${rate}x`
+      html: `${rate}x`,
     }));
   }
 
@@ -1868,7 +2016,11 @@ function PlayPageClient() {
               constructor(config: any) {
                 super(config);
                 const load = this.load.bind(this);
-                this.load = function (context: any, config: any, callbacks: any) {
+                this.load = function (
+                  context: any,
+                  config: any,
+                  callbacks: any
+                ) {
                   // 拦截manifest和level请求
                   if (
                     (context as any).type === 'manifest' ||
@@ -1880,9 +2032,9 @@ function PlayPageClient() {
                       stats: any,
                       context: any
                     ) {
-                      // 如果是m3u8文件，处理内容以移除广告分段
+                      // Chỉ lọc phần được playlist đánh dấu CUE-OUT/CUE-IN.
+                      // Không suy đoán theo độ dài hoặc tên segment.
                       if (response.data && typeof response.data === 'string') {
-                        // 过滤掉广告段 - 实现更精确的广告过滤逻辑
                         response.data = filterAdsFromM3U8(response.data);
                       }
                       return onSuccess(response, stats, context, null);
@@ -1900,7 +2052,7 @@ function PlayPageClient() {
             const hls = new Hls({
               debug: false, // 关闭日志
               enableWorker: true, // WebWorker 解码，降低主线程压力
-              lowLatencyMode: true, // 开启低延迟 LL-HLS
+              lowLatencyMode: false, // Phim VOD cần buffer ổn định hơn LL-HLS
 
               /* 缓冲/内存相关 - 极致流畅版 */
               maxBufferLength: 80, // 前向缓冲最大 80s，过大容易导致高延迟
@@ -1948,13 +2100,16 @@ function PlayPageClient() {
         },
         settings: [
           {
-            html: '拦截广告',
+            html: 'Chặn quảng cáo',
             icon: '<text x="50%" y="50%" font-size="20" font-weight="bold" text-anchor="middle" dominant-baseline="middle" fill="#ffffff">AD</text>',
-            tooltip: blockAdEnabled ? '已开启' : '已关闭',
+            tooltip: blockAdEnabled
+              ? 'Chỉ lọc đoạn được playlist đánh dấu rõ'
+              : 'Tắt để ưu tiên phát mượt',
             onClick() {
               const newVal = !blockAdEnabled;
               try {
-                localStorage.setItem('enable_blockad', String(newVal));
+                localStorage.setItem(AD_BLOCK_VALUE_KEY, String(newVal));
+                localStorage.setItem(AD_BLOCK_PREFERENCE_VERSION_KEY, 'v2');
                 if (artPlayerRef.current) {
                   resumeTimeRef.current = artPlayerRef.current.currentTime;
                   if (
@@ -1967,10 +2122,10 @@ function PlayPageClient() {
                   artPlayerRef.current = null;
                 }
                 setBlockAdEnabled(newVal);
-              } catch (_){
+              } catch (_) {
                 // ignore
               }
-              return newVal ? '当前开启' : '当前关闭';
+              return newVal ? 'Đang bật' : 'Đang tắt';
             },
           },
           {
@@ -2027,7 +2182,10 @@ function PlayPageClient() {
                 : `-${formatTime(-skipConfigRef.current.outro_time)}`,
             onClick: function () {
               const outroTime =
-                -(artPlayerRef.current?.duration - artPlayerRef.current?.currentTime) || 0;
+                -(
+                  artPlayerRef.current?.duration -
+                  artPlayerRef.current?.currentTime
+                ) || 0;
               if (outroTime < 0) {
                 const newConfig = {
                   ...skipConfigRef.current,
@@ -2039,7 +2197,6 @@ function PlayPageClient() {
             },
           },
         ],
-        
 
         // 控制栏配置
         controls: [
@@ -2058,18 +2215,18 @@ function PlayPageClient() {
             index: 20,
             html: '<b>倍数</b>',
             selector: getPlaybackRateSelector(),
-            onSelect: function(item: PlaybackRateSelector, $dom: HTMLElement){
-              artPlayerRef.current.playbackRate = item.value
-              return `<b>${item.name === '1x' ? '倍数' : item.name}</b>`
-            }
-          }
+            onSelect: function (item: PlaybackRateSelector, $dom: HTMLElement) {
+              artPlayerRef.current.playbackRate = item.value;
+              return `<b>${item.name === '1x' ? '倍数' : item.name}</b>`;
+            },
+          },
         ],
       });
       // 更新音量调节位置
       artPlayerRef.current.controls.update({
         name: 'volume',
         position: 'right',
-        index: 30
+        index: 30,
       });
 
       // 监听网页全屏事件
@@ -2248,8 +2405,6 @@ function PlayPageClient() {
     }
   }, [Artplayer, Hls, videoUrl, loading, blockAdEnabled]);
 
-  
-
   // 当组件卸载时清理定时器、Wake Lock 和播放器资源
   useEffect(() => {
     return () => {
@@ -2268,70 +2423,70 @@ function PlayPageClient() {
 
   if (loading) {
     return (
-      <PageLayout activePath='/play'>
-        <div className='flex items-center justify-center min-h-[calc(100vh-3rem)] md:min-h-screen bg-transparent overflow-hidden md:overflow-visible'>
-          <div className='text-center max-w-md mx-auto px-6 transform -translate-y-16 md:-translate-y-4'>
+      <PageLayout activePath="/play">
+        <div className="flex items-center justify-center min-h-[calc(100vh-3rem)] md:min-h-screen bg-transparent overflow-hidden md:overflow-visible">
+          <div className="text-center max-w-md mx-auto px-6 transform -translate-y-16 md:-translate-y-4">
             {/* New Animation */}
             <div className="wrapper">
-                {/* 茶包 */}
-                <div className="teabag">
-                    {/* 茶包顶部 */}
-                    <div className="teabag-top"></div>
-                    {/* 茶包身体 */}
-                    <div className="teabag-body">
-                        <div className="teabag-content">
-                            <div className="teabag-eyes eyes">
-                                <div className="teabag-eye eye"></div>
-                                <div className="teabag-eye eye"></div>
-                            </div>
-                            <div className="teabag-mouth"></div>
-                        </div>
+              {/* 茶包 */}
+              <div className="teabag">
+                {/* 茶包顶部 */}
+                <div className="teabag-top"></div>
+                {/* 茶包身体 */}
+                <div className="teabag-body">
+                  <div className="teabag-content">
+                    <div className="teabag-eyes eyes">
+                      <div className="teabag-eye eye"></div>
+                      <div className="teabag-eye eye"></div>
                     </div>
-                    {/* 茶包孔 */}
-                    <div className="teabag-pores">
-                        <span className="teabag-pore"></span>
-                        <span className="teabag-pore"></span>
-                        <span className="teabag-pore"></span>
-                        <span className="teabag-pore"></span>
-                        <span className="teabag-pore"></span>
-                        <span className="teabag-pore"></span>
-                        <span className="teabag-pore"></span>
-                        <span className="teabag-pore"></span>
-                        <span className="teabag-pore"></span>
-                        <span className="teabag-pore"></span>
-                        <span className="teabag-pore"></span>
-                        <span className="teabag-pore"></span>
-                        <span className="teabag-pore"></span>
-                        <span className="teabag-pore"></span>
-                    </div>
+                    <div className="teabag-mouth"></div>
+                  </div>
                 </div>
-                {/* 茶杯 */}
-                <div className="cup">
-                    {/* 杯子 */}
-                    <div className="cup-body">
-                        <div className="cup-eyes eyes">
-                            <div className="cup-eye eye"></div>
-                            <div className="cup-eye eye"></div>
-                        </div>
-                        <div className="cup-mouth">
-                            <div className="cup-tongue"></div>
-                        </div>
-                    </div>
-                    {/* 杯柄 */}
-                    <div className="cup-handle"></div>
-                    {/* 杯碟 */}
-                    <div className="cup-saucer">
-                        <div className="cup-saucer-top"></div>
-                        <div className="cup-saucer-bottom"></div>
-                    </div>
+                {/* 茶包孔 */}
+                <div className="teabag-pores">
+                  <span className="teabag-pore"></span>
+                  <span className="teabag-pore"></span>
+                  <span className="teabag-pore"></span>
+                  <span className="teabag-pore"></span>
+                  <span className="teabag-pore"></span>
+                  <span className="teabag-pore"></span>
+                  <span className="teabag-pore"></span>
+                  <span className="teabag-pore"></span>
+                  <span className="teabag-pore"></span>
+                  <span className="teabag-pore"></span>
+                  <span className="teabag-pore"></span>
+                  <span className="teabag-pore"></span>
+                  <span className="teabag-pore"></span>
+                  <span className="teabag-pore"></span>
                 </div>
+              </div>
+              {/* 茶杯 */}
+              <div className="cup">
+                {/* 杯子 */}
+                <div className="cup-body">
+                  <div className="cup-eyes eyes">
+                    <div className="cup-eye eye"></div>
+                    <div className="cup-eye eye"></div>
+                  </div>
+                  <div className="cup-mouth">
+                    <div className="cup-tongue"></div>
+                  </div>
+                </div>
+                {/* 杯柄 */}
+                <div className="cup-handle"></div>
+                {/* 杯碟 */}
+                <div className="cup-saucer">
+                  <div className="cup-saucer-top"></div>
+                  <div className="cup-saucer-bottom"></div>
+                </div>
+              </div>
             </div>
 
             {/* 进度指示器 */}
-            <div className='-mt-8 mb-6 w-80 mx-auto'>
-              <div className='flex justify-center space-x-2 mb-4'>
+            <div className="-mt-8 mb-6 w-80 mx-auto">
+              <div className="flex justify-center space-x-2 mb-4">
                 <div
-                  className={`w-3 h-3 rounded-full transition-all duration-500 ${ 
+                  className={`w-3 h-3 rounded-full transition-all duration-500 ${
                     loadingStage === 'searching' || loadingStage === 'fetching'
                       ? 'bg-joyflix-blue scale-125'
                       : loadingStage === 'preferring' ||
@@ -2341,7 +2496,7 @@ function PlayPageClient() {
                   }`}
                 ></div>
                 <div
-                  className={`w-3 h-3 rounded-full transition-all duration-500 ${ 
+                  className={`w-3 h-3 rounded-full transition-all duration-500 ${
                     loadingStage === 'preferring'
                       ? 'bg-joyflix-blue scale-125'
                       : loadingStage === 'ready'
@@ -2350,7 +2505,7 @@ function PlayPageClient() {
                   }`}
                 ></div>
                 <div
-                  className={`w-3 h-3 rounded-full transition-all duration-500 ${ 
+                  className={`w-3 h-3 rounded-full transition-all duration-500 ${
                     loadingStage === 'ready'
                       ? 'bg-joyflix-blue scale-125'
                       : 'bg-gray-200'
@@ -2359,9 +2514,9 @@ function PlayPageClient() {
               </div>
 
               {/* 进度条 */}
-              <div className='w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2 overflow-hidden'>
+              <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2 overflow-hidden">
                 <div
-                  className='h-full bg-gradient-to-r from-joyflix-blue to-joyflix-blue-dark rounded-full transition-all duration-1000 ease-out'
+                  className="h-full bg-gradient-to-r from-joyflix-blue to-joyflix-blue-dark rounded-full transition-all duration-1000 ease-out"
                   style={{
                     width:
                       loadingStage === 'searching' ||
@@ -2376,8 +2531,8 @@ function PlayPageClient() {
             </div>
 
             {/* 加载消息 */}
-            <div className='space-y-2'>
-              <p className='text-xl font-semibold text-gray-800 dark:text-gray-200 animate-pulse'>
+            <div className="space-y-2">
+              <p className="text-xl font-semibold text-gray-800 dark:text-gray-200 animate-pulse">
                 {loadingMessage}
               </p>
             </div>
@@ -2389,59 +2544,59 @@ function PlayPageClient() {
 
   if (error) {
     return (
-      <PageLayout activePath='/play'>
-        <div className='flex items-center justify-center min-h-screen bg-transparent'>
-          <div className='text-center max-w-md mx-auto px-6'>
+      <PageLayout activePath="/play">
+        <div className="flex items-center justify-center min-h-screen bg-transparent">
+          <div className="text-center max-w-md mx-auto px-6">
             {/* 错误图标 */}
-            <div className='relative mb-8'>
-              <div className='relative mx-auto w-24 h-24 bg-gradient-to-r from-red-500 to-orange-500 rounded-2xl shadow-2xl flex items-center justify-center transform hover:scale-105 transition-transform duration-300'>
-                <div className='text-white text-4xl'>😵</div>
+            <div className="relative mb-8">
+              <div className="relative mx-auto w-24 h-24 bg-gradient-to-r from-red-500 to-orange-500 rounded-2xl shadow-2xl flex items-center justify-center transform hover:scale-105 transition-transform duration-300">
+                <div className="text-white text-4xl">😵</div>
                 {/* 脉冲效果 */}
-                <div className='absolute -inset-2 bg-gradient-to-r from-red-500 to-orange-500 rounded-2xl opacity-20 animate-pulse'></div>
+                <div className="absolute -inset-2 bg-gradient-to-r from-red-500 to-orange-500 rounded-2xl opacity-20 animate-pulse"></div>
               </div>
 
               {/* 浮动错误粒子 */}
-              <div className='absolute top-0 left-0 w-full h-full pointer-events-none'>
-                <div className='absolute top-2 left-2 w-2 h-2 bg-red-400 rounded-full animate-bounce'></div>
+              <div className="absolute top-0 left-0 w-full h-full pointer-events-none">
+                <div className="absolute top-2 left-2 w-2 h-2 bg-red-400 rounded-full animate-bounce"></div>
                 <div
-                  className='absolute top-4 right-4 w-1.5 h-1.5 bg-orange-400 rounded-full animate-bounce'
+                  className="absolute top-4 right-4 w-1.5 h-1.5 bg-orange-400 rounded-full animate-bounce"
                   style={{ animationDelay: '0.5s' }}
                 ></div>
                 <div
-                  className='absolute bottom-3 left-6 w-1 h-1 bg-yellow-400 rounded-full animate-bounce'
+                  className="absolute bottom-3 left-6 w-1 h-1 bg-yellow-400 rounded-full animate-bounce"
                   style={{ animationDelay: '1s' }}
                 ></div>
               </div>
             </div>
 
             {/* 错误信息 */}
-            <div className='space-y-4 mb-8'>
-              <h2 className='text-2xl font-bold text-gray-800 dark:text-gray-200'>
+            <div className="space-y-4 mb-8">
+              <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-200">
                 出现了一些问题
               </h2>
-              <div className='bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4'>
-                <p className='text-red-600 dark:text-red-400 font-medium'> 
+              <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4">
+                <p className="text-red-600 dark:text-red-400 font-medium">
                   {error}
                 </p>
               </div>
             </div>
 
             {/* 操作按钮 */}
-            <div className='space-y-3'>
+            <div className="space-y-3">
               <button
                 onClick={() =>
                   videoTitle
                     ? router.push(`/search?q=${encodeURIComponent(videoTitle)}`)
                     : router.back()
                 }
-                className='w-full px-6 py-3 bg-gradient-to-r from-blue-400 to-blue-500 text-white rounded-xl font-medium hover:from-blue-400 hover:to-blue-600 transform hover:scale-105 transition-all duration-200 shadow-lg hover:shadow-xl'
+                className="w-full px-6 py-3 bg-gradient-to-r from-blue-400 to-blue-500 text-white rounded-xl font-medium hover:from-blue-400 hover:to-blue-600 transform hover:scale-105 transition-all duration-200 shadow-lg hover:shadow-xl"
               >
                 {videoTitle ? '返回搜索' : '返回上页'}
               </button>
 
               <button
                 onClick={() => window.location.reload()}
-                className='w-full px-6 py-3 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-xl font-medium hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors duration-200'
+                className="w-full px-6 py-3 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-xl font-medium hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors duration-200"
               >
                 重新尝试
               </button>
@@ -2453,36 +2608,33 @@ function PlayPageClient() {
   }
 
   return (
-    <PageLayout 
-      activePath='/play'
+    <PageLayout
+      activePath="/play"
       headerContent={
-        <h1 className='text-xl font-semibold text-gray-900 dark:text-gray-100 ml-4'>
+        <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100 ml-4">
           {videoTitle || '影片标题'}
           {totalEpisodes > 1 && (
-            <span className='text-gray-500 dark:text-gray-400'>
+            <span className="text-gray-500 dark:text-gray-400">
               {` > 第 ${currentEpisodeIndex + 1} 集`}
             </span>
           )}
         </h1>
       }
     >
-      <div className='flex flex-col gap-3 py-4 px-5 lg:px-[3rem] 2xl:px-20'>
+      <div className="flex flex-col gap-3 py-4 px-5 lg:px-[3rem] 2xl:px-20">
         {/* 第一行：影片标题 */}
-        <div className='py-1'>
-          <h1 className='text-xl font-semibold text-gray-900 dark:text-gray-100 md:invisible'>
+        <div className="py-1">
+          <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100 md:invisible">
             {videoTitle || '影片标题'}
             {totalEpisodes > 1 && (
-              <span className='text-gray-500 dark:text-gray-400'>
+              <span className="text-gray-500 dark:text-gray-400">
                 {` > 第 ${currentEpisodeIndex + 1} 集`}
               </span>
             )}
           </h1>
         </div>
         {/* 第二行：播放器和集数 */}
-        <div className='space-y-2'>
-          
-          
-
+        <div className="space-y-2">
           <div
             className={`grid gap-4 lg:h-[500px] xl:h-[650px] 2xl:h-[750px] transition-all duration-300 ease-in-out grid-cols-1 md:grid-cols-4`}
           >
@@ -2490,13 +2642,11 @@ function PlayPageClient() {
             <div
               className={`h-full transition-all duration-300 ease-in-out rounded-xl border border-white/0 dark:border-white/30 md:col-span-3`}
             >
-              <div className='relative w-full h-[300px] lg:h-full'>
+              <div className="relative w-full h-[300px] lg:h-full">
                 <div
                   ref={artRef}
-                  className='bg-black w-full h-full rounded-xl overflow-hidden shadow-lg'
+                  className="bg-black w-full h-full rounded-xl overflow-hidden shadow-lg"
                 ></div>
-
-                
               </div>
             </div>
 
@@ -2505,7 +2655,11 @@ function PlayPageClient() {
               className={`relative h-[300px] lg:h-full md:overflow-hidden transition-all duration-300 ease-in-out md:col-span-1 lg:opacity-100 lg:scale-100`}
             >
               {longPressedTitle && (
-                <div className={`absolute top-0 left-0 right-0 z-20 p-2 bg-gray-800/90 text-white text-center text-sm shadow-lg ${isFadingOut ? 'animate-fade-out' : 'animate-fade-in-down'}`}>
+                <div
+                  className={`absolute top-0 left-0 right-0 z-20 p-2 bg-gray-800/90 text-white text-center text-sm shadow-lg ${
+                    isFadingOut ? 'animate-fade-out' : 'animate-fade-in-down'
+                  }`}
+                >
                   {longPressedTitle}
                 </div>
               )}
@@ -2529,22 +2683,21 @@ function PlayPageClient() {
         </div>
 
         {/* 详情展示 */}
-        <div className='grid grid-cols-1 md:grid-cols-4 gap-4'>
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           {/* 文字区 */}
-          <div className='md:col-span-3'>
-            <div className='p-6 flex flex-col min-h-0'>
+          <div className="md:col-span-3">
+            <div className="p-6 flex flex-col min-h-0">
               {/* 标题 */}
-              <h1 className='text-3xl font-bold mb-2 tracking-wide flex items-center flex-shrink-0 text-center md:text-left w-full'>
+              <h1 className="text-3xl font-bold mb-2 tracking-wide flex items-center flex-shrink-0 text-center md:text-left w-full">
                 {videoTitle || '影片标题'}
-                
               </h1>
 
               {/* 关键信息行 */}
-              <div className='flex flex-wrap items-center gap-x-2 gap-y-1 text-sm mb-4 text-gray-600 dark:text-gray-300 flex-shrink-0'>
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm mb-4 text-gray-600 dark:text-gray-300 flex-shrink-0">
                 {/* 年份 (Year) - First */}
                 {(detail?.year || videoYear) && (
                   <>
-                    <span className='border border-gray-500/60 px-2 py-[1px] rounded'>
+                    <span className="border border-gray-500/60 px-2 py-[1px] rounded">
                       {detail?.year || videoYear}
                     </span>
                   </>
@@ -2553,7 +2706,7 @@ function PlayPageClient() {
                 {/* 分类 (Class) - Second */}
                 {detail?.class && (
                   <>
-                    <span className='border border-gray-500/60 px-2 py-[1px] rounded'>
+                    <span className="border border-gray-500/60 px-2 py-[1px] rounded">
                       {detail.class}
                     </span>
                   </>
@@ -2562,7 +2715,7 @@ function PlayPageClient() {
                 {/* 类型名称 (Type Name) - Fourth */}
                 {detail?.type_name && (
                   <>
-                    <span className='border border-gray-500/60 px-2 py-[1px] rounded'>
+                    <span className="border border-gray-500/60 px-2 py-[1px] rounded">
                       {detail.type_name}
                     </span>
                   </>
@@ -2570,7 +2723,7 @@ function PlayPageClient() {
 
                 {/* 来源名称 (Source Name) - Third */}
                 {detail?.source_name && (
-                  <span className='border border-gray-500/60 px-2 py-[1px] rounded'>
+                  <span className="border border-gray-500/60 px-2 py-[1px] rounded">
                     {detail.source_name}
                   </span>
                 )}
@@ -2578,7 +2731,7 @@ function PlayPageClient() {
               {/* 剧情简介 */}
               {detail?.desc && (
                 <div
-                  className='mt-0 text-base leading-relaxed opacity-90 overflow-y-auto pr-2 flex-1 min-h-0 scrollbar-hide'
+                  className="mt-0 text-base leading-relaxed opacity-90 overflow-y-auto pr-2 flex-1 min-h-0 scrollbar-hide"
                   style={{ whiteSpace: 'pre-line' }}
                 >
                   {detail.desc}
@@ -2588,21 +2741,19 @@ function PlayPageClient() {
           </div>
 
           {/* 封面展示 */}
-          <div className='hidden md:block md:col-span-1 md:order-first'>
-            <div className='pl-0 py-4 pr-6'>
-              <div className='relative bg-gray-300 dark:bg-gray-700 aspect-[2/3] flex items-center justify-center rounded-xl overflow-hidden'>
+          <div className="hidden md:block md:col-span-1 md:order-first">
+            <div className="pl-0 py-4 pr-6">
+              <div className="relative bg-gray-300 dark:bg-gray-700 aspect-[2/3] flex items-center justify-center rounded-xl overflow-hidden">
                 {videoCover ? (
                   <>
                     <img
                       src={processImageUrl(videoCover)}
                       alt={videoTitle}
-                      className='w-full h-full object-cover'
+                      className="w-full h-full object-cover"
                     />
-
-                    
                   </>
                 ) : (
-                  <span className='text-gray-600 dark:text-gray-400'>
+                  <span className="text-gray-600 dark:text-gray-400">
                     封面图片
                   </span>
                 )}
@@ -2614,8 +2765,6 @@ function PlayPageClient() {
     </PageLayout>
   );
 }
-
-
 
 export default function PlayPage() {
   return (

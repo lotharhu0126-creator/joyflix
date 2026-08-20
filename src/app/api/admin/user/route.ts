@@ -7,7 +7,7 @@ import { getConfig } from '@/lib/config';
 import { getStorage } from '@/lib/db';
 import { IStorage } from '@/lib/types';
 
-export const runtime = 'edge';
+export const runtime = 'nodejs';
 
 // 支持的操作类型
 const ACTIONS = [
@@ -21,7 +21,7 @@ const ACTIONS = [
 ] as const;
 
 export async function POST(request: NextRequest) {
-  const storageType = process.env.NEXT_PUBLIC_STORAGE_TYPE || 'localstorage';
+  const storageType = process.env.NEXT_PUBLIC_STORAGE_TYPE || 'sqlite';
   if (storageType === 'localstorage') {
     return NextResponse.json(
       {
@@ -127,9 +127,7 @@ export async function POST(request: NextRequest) {
           role: 'user',
         });
         targetEntry =
-          adminConfig.UserConfig.Users[
-            adminConfig.UserConfig.Users.length - 1
-          ];
+          adminConfig.UserConfig.Users[adminConfig.UserConfig.Users.length - 1];
         break;
       }
       case 'ban': {
@@ -263,10 +261,7 @@ export async function POST(request: NextRequest) {
 
         // 权限检查：超管可删除所有用户（除了自己），管理员可删除用户
         if (username === targetUsername) {
-          return NextResponse.json(
-            { error: '不能删除自己' },
-            { status: 400 }
-          );
+          return NextResponse.json({ error: '不能删除自己' }, { status: 400 });
         }
 
         if (isTargetAdmin && operatorRole !== 'owner') {

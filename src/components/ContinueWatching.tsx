@@ -39,7 +39,7 @@ export default function ContinueWatching({ className }: ContinueWatchingProps) {
 
     // --- 添加去重逻辑 ---
     const uniqueRecordsMap = new Map<string, PlayRecord & { key: string }>();
-    sortedRecords.forEach(record => {
+    sortedRecords.forEach((record) => {
       const key = `${record.title}-${record.year}`;
       if (!uniqueRecordsMap.has(key)) {
         uniqueRecordsMap.set(key, record);
@@ -99,8 +99,8 @@ export default function ContinueWatching({ className }: ContinueWatchingProps) {
 
   return (
     <section className={`mb-8 ${className || ''}`}>
-      <div className='mb-4 flex items-center justify-between'>
-        <h2 className='text-xl font-bold text-gray-800 dark:text-gray-200'>
+      <div className="mb-4 flex items-center justify-between">
+        <h2 className="text-xl font-bold text-gray-800 dark:text-gray-200">
           继续观看
         </h2>
         {!loading && playRecords.length > 0 && (
@@ -112,7 +112,7 @@ export default function ContinueWatching({ className }: ContinueWatchingProps) {
           >
             <Trash2
               size={20}
-              className='text-gray-500 dark:text-gray-400 transition-all duration-300 ease-out hover:stroke-red-500 hover:scale-[1.1]'
+              className="text-gray-500 dark:text-gray-400 transition-all duration-300 ease-out hover:stroke-red-500 hover:scale-[1.1]"
             />
           </button>
         )}
@@ -123,22 +123,22 @@ export default function ContinueWatching({ className }: ContinueWatchingProps) {
             Array.from({ length: 6 }).map((_, index) => (
               <div
                 key={index}
-                className='min-w-[96px] w-24 sm:min-w-[180px] sm:w-44'
+                className="min-w-[96px] w-24 sm:min-w-[180px] sm:w-44"
               >
-                <div className='relative aspect-[2/3] w-full overflow-hidden rounded-lg bg-gray-200 animate-pulse dark:bg-gray-800'>
-                  <div className='absolute inset-0 bg-gray-300 dark:bg-gray-700'></div>
+                <div className="relative aspect-[2/3] w-full overflow-hidden rounded-lg bg-gray-200 animate-pulse dark:bg-gray-800">
+                  <div className="absolute inset-0 bg-gray-300 dark:bg-gray-700"></div>
                 </div>
-                <div className='mt-2 h-4 bg-gray-200 rounded animate-pulse dark:bg-gray-800'></div>
-                <div className='mt-1 h-3 bg-gray-200 rounded animate-pulse dark:bg-gray-800'></div>
+                <div className="mt-2 h-4 bg-gray-200 rounded animate-pulse dark:bg-gray-800"></div>
+                <div className="mt-1 h-3 bg-gray-200 rounded animate-pulse dark:bg-gray-800"></div>
               </div>
             ))
           : // 显示真实数据
-            playRecords.map((record) => {
+            playRecords.map((record, index) => {
               const { source, id } = parseKey(record.key);
               return (
                 <div
                   key={record.key}
-                  className='min-w-[96px] w-24 sm:min-w-[180px] sm:w-44'
+                  className="min-w-[96px] w-24 sm:min-w-[180px] sm:w-44"
                 >
                   <VideoCard
                     id={id}
@@ -151,7 +151,8 @@ export default function ContinueWatching({ className }: ContinueWatchingProps) {
                     episodes={record.total_episodes}
                     currentEpisode={record.index}
                     query={record.search_title}
-                    from='playrecord'
+                    from="playrecord"
+                    priority={index < 4}
                     onDelete={() =>
                       setPlayRecords((prev) =>
                         prev.filter((r) => r.key !== record.key)

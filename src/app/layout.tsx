@@ -58,7 +58,8 @@ export default async function RootLayout({
   let doubanImageProxyType =
     process.env.NEXT_PUBLIC_DOUBAN_IMAGE_PROXY_TYPE || 'img3';
   let doubanImageProxy = process.env.NEXT_PUBLIC_DOUBAN_IMAGE_PROXY || '';
-  let customCategories = (RuntimeConfig as any).custom_category?.map((category: any) => ({
+  let customCategories =
+    (RuntimeConfig as any).custom_category?.map((category: any) => ({
       name: 'name' in category ? category.name : '',
       type: category.type,
       query: category.query,
@@ -82,7 +83,7 @@ export default async function RootLayout({
 
   // 将运行时配置注入到全局 window 对象，供客户端在运行时读取
   const runtimeConfig = {
-    STORAGE_TYPE: process.env.NEXT_PUBLIC_STORAGE_TYPE || 'localstorage',
+    STORAGE_TYPE: process.env.NEXT_PUBLIC_STORAGE_TYPE || 'sqlite',
     DOUBAN_PROXY_TYPE: doubanProxyType,
     DOUBAN_PROXY: doubanProxy,
     DOUBAN_IMAGE_PROXY_TYPE: doubanImageProxyType,
@@ -91,21 +92,29 @@ export default async function RootLayout({
   };
 
   return (
-    <html lang='zh-CN' suppressHydrationWarning>
+    <html lang="zh-CN" suppressHydrationWarning>
       <head>
         <meta
-          name='viewport'
-          content='width=device-width, initial-scale=1.0, viewport-fit=cover'
+          name="viewport"
+          content="width=device-width, initial-scale=1.0, viewport-fit=cover"
         />
-        <link rel='apple-touch-icon' href='/icons/icon-192x192.png' />
+        <link rel="apple-touch-icon" href="/icons/icon-192x192.png" />
         {/* 
           为移动端浏览器状态栏设置主题颜色。
           浅色模式下，iOS 状态栏为白色背景、深色文字，Android 为浅灰色背景、深色文字。
           深色模式下，状态栏统一为黑色背景、浅色文字。
           这确保了应用在不同设备和主题下都有一致的视觉体验。
         */}
-        <meta name="theme-color" content="#C5D8E2" media="(prefers-color-scheme: light)" />
-        <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)" />
+        <meta
+          name="theme-color"
+          content="#C5D8E2"
+          media="(prefers-color-scheme: light)"
+        />
+        <meta
+          name="theme-color"
+          content="#000000"
+          media="(prefers-color-scheme: dark)"
+        />
 
         {/* 将配置序列化后直接写入脚本，浏览器端可通过 window.RUNTIME_CONFIG 获取 */}
         {/* eslint-disable-next-line @next/next/no-sync-scripts */}
@@ -120,8 +129,8 @@ export default async function RootLayout({
       >
         <div className="light-theme-background fixed inset-0 -z-10" />
         <ThemeProvider
-          attribute='class'
-          defaultTheme='light'
+          attribute="class"
+          defaultTheme="light"
           disableTransitionOnChange
         >
           <SiteProvider siteName={siteName} announcement={announcement}>

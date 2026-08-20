@@ -2,30 +2,17 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 
-import { getAuthInfoFromCookie } from '@/lib/auth';
+import { hasValidAccountSession } from '@/lib/auth';
+import { filterAdultResults } from '@/lib/adult-content';
 import { getConfig } from '@/lib/config';
 import { searchFromApi } from '@/lib/downstream';
 
-export const runtime = 'edge';
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest) {
   try {
-    // 从 cookie 获取用户信息
-    const authInfo = getAuthInfoFromCookie(request);
-    if (!authInfo) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
     const config = await getConfig();
-    if (config.UserConfig.Users) {
-      // 检查用户是否被封禁
-      const user = config.UserConfig.Users.find(
-        (u) => u.username === authInfo.username
-      );
-      if (user && user.banned) {
-        return NextResponse.json({ error: '用户已被封禁' }, { status: 401 });
-      }
-    }
 
     const { searchParams } = new URL(request.url);
     const query = searchParams.get('q')?.trim();
@@ -35,19 +22,16 @@ export async function GET(request: NextRequest) {
     }
 
     // 生成建议
-    const suggestions = await generateSuggestions(query);
-
-    // 从配置中获取缓存时间，如果没有配置则使用默认值300秒（5分钟）
-    const cacheTime = config.SiteConfig.SiteInterfaceCacheTime || 300;
+    const suggestions = await generateSuggestions(
+      query,
+      await hasValidAccountSession(request)
+    );
 
     return NextResponse.json(
       { suggestions },
       {
         headers: {
-          'Cache-Control': `public, max-age=${cacheTime}, s-maxage=${cacheTime}`,
-          'CDN-Cache-Control': `public, s-maxage=${cacheTime}`,
-          'Vercel-CDN-Cache-Control': `public, s-maxage=${cacheTime}`,
-          'Netlify-Vary': 'query',
+          'Cache-Control': 'private, no-store',
         },
       }
     );
@@ -57,7 +41,10 @@ export async function GET(request: NextRequest) {
   }
 }
 
-async function generateSuggestions(query: string): Promise<
+async function generateSuggestions(
+  query: string,
+  includeAdult: boolean
+): Promise<
   Array<{
     text: string;
     type: 'exact' | 'related' | 'suggestion';
@@ -73,7 +60,10 @@ async function generateSuggestions(query: string): Promise<
   if (apiSites.length > 0) {
     // 取第一个可用的数据源进行搜索
     const firstSite = apiSites[0];
-    const results = await searchFromApi(firstSite, query);
+    const results = filterAdultResults(
+      await searchFromApi(firstSite, query),
+      includeAdult
+    );
 
     realKeywords = Array.from(
       new Set(

@@ -14,7 +14,6 @@ import {
 } from '@/lib/db.client';
 import { DoubanResult, SearchResult } from '@/lib/types';
 
-
 import PageLayout from '@/components/PageLayout';
 import SearchSuggestions from '@/components/SearchSuggestions';
 import VideoCard from '@/components/VideoCard';
@@ -33,20 +32,28 @@ const SearchPageClient: React.FC = () => {
   const [isStreaming, setIsStreaming] = useState(false); // 新增：追踪流状态
   const [showResults, setShowResults] = useState(false);
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [sourceFilter, setSourceFilter] = useState<'all' | 'bdzy'>('all');
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [recommendedSearches, setRecommendedSearches] = useState<
     DoubanResult['list']
   >([]);
-  const [isRecommendationsLoading, setIsRecommendationsLoading] = useState(true);
-  
+  const [isRecommendationsLoading, setIsRecommendationsLoading] =
+    useState(true);
+
+  const visibleSearchResults = useMemo(
+    () =>
+      sourceFilter === 'bdzy'
+        ? searchResults.filter((item) => item.source === 'bdzy')
+        : searchResults,
+    [searchResults, sourceFilter]
+  );
+
   // 聚合后的结果（按标题和年份分组）
   const aggregatedResults = useMemo(() => {
     const map = new Map<string, SearchResult[]>();
-    searchResults.forEach((item) => {
+    visibleSearchResults.forEach((item) => {
       // 使用 title + year 作为键进行聚合，year 必然存在，但依然兜底 'unknown'
-      const key = `${item.title.replaceAll(' ', '')}-${
-        item.year || 'unknown'
-      }`;
+      const key = `${item.title.replaceAll(' ', '')}-${item.year || 'unknown'}`;
       const arr = map.get(key) || [];
       arr.push(item);
       map.set(key, arr);
@@ -90,7 +97,7 @@ const SearchPageClient: React.FC = () => {
         }
       }
     });
-  }, [searchResults, searchQuery]);
+  }, [visibleSearchResults, searchQuery]);
 
   useEffect(() => {
     // 初始加载搜索历史
@@ -146,13 +153,17 @@ const SearchPageClient: React.FC = () => {
     // 获取推荐
     const fetchRecommended = async () => {
       try {
-        console.log('[SearchPageClient] Attempting to fetch recommendations from /api/recommendations');
+        console.log(
+          '[SearchPageClient] Attempting to fetch recommendations from /api/recommendations'
+        );
         const response = await fetch('/api/recommendations');
 
         const data = response.ok ? await response.json() : { list: [] };
 
         // The new API already returns a shuffled and sliced list of titles
-        setRecommendedSearches(data.list.map((title: string) => ({ id: title, title: title })));
+        setRecommendedSearches(
+          data.list.map((title: string) => ({ id: title, title: title }))
+        );
       } catch (error) {
         console.error('Failed to fetch recommended searches:', error);
       } finally {
@@ -186,6 +197,7 @@ const SearchPageClient: React.FC = () => {
       setIsStreaming(true); // 开始流
       setShowResults(true);
       setSearchResults([]);
+      setSourceFilter('all');
 
       const response = await fetch(
         `/api/searchstream?q=${encodeURIComponent(query.trim())}`
@@ -226,7 +238,9 @@ const SearchPageClient: React.FC = () => {
             const filterKeywords = ['电影解说', '剧情解说', '预告片', '解说'];
             filteredResults = filteredResults.filter(
               (result) =>
-                !filterKeywords.some((keyword) => result.title.includes(keyword))
+                !filterKeywords.some((keyword) =>
+                  result.title.includes(keyword)
+                )
             );
 
             if (filteredResults.length > 0) {
@@ -237,7 +251,18 @@ const SearchPageClient: React.FC = () => {
               }
 
               setSearchResults((prevResults) => {
-                const allResults = [...prevResults, ...filteredResults];
+                const knownResults = new Set(
+                  prevResults.map((item) => `${item.source}+${item.id}`)
+                );
+                const allResults = [
+                  ...prevResults,
+                  ...filteredResults.filter((item) => {
+                    const key = `${item.source}+${item.id}`;
+                    if (knownResults.has(key)) return false;
+                    knownResults.add(key);
+                    return true;
+                  }),
+                ];
                 return allResults.sort((a, b) => {
                   const aExactMatch = a.title === query.trim();
                   const bExactMatch = b.title === query.trim();
@@ -300,12 +325,11 @@ const SearchPageClient: React.FC = () => {
     setShowResults(true);
     setShowSuggestions(false);
 
-    router.push(`/search?q=${encodeURIComponent(trimmed)}`);
-    // 直接发请求
-    fetchSearchResults(trimmed);
-
-    // 保存到搜索历史 (事件监听会自动更新界面)
-    addSearchHistory(trimmed);
+    if (searchParams.get('q') === trimmed) {
+      fetchSearchResults(trimmed);
+    } else {
+      router.push(`/search?q=${encodeURIComponent(trimmed)}`);
+    }
   };
 
   const handleSuggestionSelect = (suggestion: string) => {
@@ -316,9 +340,11 @@ const SearchPageClient: React.FC = () => {
     setIsLoading(true);
     setShowResults(true);
 
-    router.push(`/search?q=${encodeURIComponent(suggestion)}`);
-    fetchSearchResults(suggestion);
-    addSearchHistory(suggestion);
+    if (searchParams.get('q') === suggestion) {
+      fetchSearchResults(suggestion);
+    } else {
+      router.push(`/search?q=${encodeURIComponent(suggestion)}`);
+    }
   };
 
   // 返回顶部功能
@@ -383,13 +409,40 @@ const SearchPageClient: React.FC = () => {
                     </div>
                   )}
                 </div>
-
+                {searchResults.some((item) => item.source === 'bdzy') && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setSourceFilter('all')}
+                      aria-pressed={sourceFilter === 'all'}
+                      className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                        sourceFilter === 'all'
+                          ? 'bg-blue-500 text-white'
+                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'
+                      }`}
+                    >
+                      Tất cả
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSourceFilter('bdzy')}
+                      aria-pressed={sourceFilter === 'bdzy'}
+                      className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                        sourceFilter === 'bdzy'
+                          ? 'bg-blue-500 text-white'
+                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'
+                      }`}
+                    >
+                      Chỉ BDZY
+                    </button>
+                  </div>
+                )}
               </div>
               {isLoading ? (
                 <div className="justify-start grid grid-cols-3 gap-x-2 gap-y-14 sm:gap-y-20 px-0 sm:px-2 sm:grid-cols-[repeat(auto-fill,_minmax(11rem,_1fr))] sm:gap-x-8">
                   {Array.from({ length: 12 }).map((_, index) => (
-                    <VideoCardSkeleton 
-                      key={index} 
+                    <VideoCardSkeleton
+                      key={index}
                       className="w-full"
                       showYear={true}
                     />
@@ -401,23 +454,25 @@ const SearchPageClient: React.FC = () => {
                   className="justify-start grid grid-cols-3 gap-x-2 gap-y-14 sm:gap-y-20 px-0 sm:px-2 sm:grid-cols-[repeat(auto-fill,_minmax(11rem,_1fr))] sm:gap-x-8"
                 >
                   {aggregatedResults.map(([mapKey, group]) => {
-                        return (
-                          <div key={`agg-${mapKey}`} className="w-full">
-                            <VideoCard
-                              from="search"
-                              items={group}
-                              query={
-                                searchQuery.trim() !== group[0].title
-                                  ? searchQuery.trim()
-                                  : ''
-                              }
-                            />
-                          </div>
-                        );
-                      })}
-                  {searchResults.length === 0 && !isStreaming && (
+                    return (
+                      <div key={`agg-${mapKey}`} className="w-full">
+                        <VideoCard
+                          from="search"
+                          items={group}
+                          query={
+                            searchQuery.trim() !== group[0].title
+                              ? searchQuery.trim()
+                              : ''
+                          }
+                        />
+                      </div>
+                    );
+                  })}
+                  {visibleSearchResults.length === 0 && !isStreaming && (
                     <div className="col-span-full text-center text-gray-500 py-8 dark:text-gray-400">
-                      未找到相关结果
+                      {sourceFilter === 'bdzy'
+                        ? 'BDZY chưa có kết quả phù hợp'
+                        : '未找到相关结果'}
                     </div>
                   )}
                 </div>
@@ -427,7 +482,9 @@ const SearchPageClient: React.FC = () => {
             <>
               {searchHistory.length > 0 && (
                 <section className="mb-12">
-                  <h2 className="mb-4 text-xl font-bold text-gray-800 text-left dark:text-gray-200 flex items-center"> {/* Added flex items-center */}
+                  <h2 className="mb-4 text-xl font-bold text-gray-800 text-left dark:text-gray-200 flex items-center">
+                    {' '}
+                    {/* Added flex items-center */}
                     搜索历史
                     {searchHistory.length > 0 && (
                       <button
@@ -438,7 +495,7 @@ const SearchPageClient: React.FC = () => {
                       >
                         <Trash2
                           size={20}
-                          className='text-gray-500 dark:text-gray-400 transition-all duration-300 ease-out hover:stroke-red-500 hover:scale-[1.1]'
+                          className="text-gray-500 dark:text-gray-400 transition-all duration-300 ease-out hover:stroke-red-500 hover:scale-[1.1]"
                         />
                       </button>
                     )}

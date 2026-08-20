@@ -83,11 +83,12 @@ const STORAGE_TYPE = (() => {
     (typeof window !== 'undefined' &&
       (window as any).RUNTIME_CONFIG?.STORAGE_TYPE) ||
     (process.env.STORAGE_TYPE as
+      | 'sqlite'
       | 'localstorage'
       | 'redis'
       | 'upstash'
       | undefined) ||
-    'localstorage';
+    'sqlite';
   return raw;
 })();
 
@@ -495,6 +496,20 @@ export function generateStorageKey(source: string, id: string): string {
   return `${source}+${id}`;
 }
 
+function hasSignedInAccount(): boolean {
+  return Boolean(getAuthInfoFromBrowserCookie()?.username);
+}
+
+function usesPersistentAccountStorage(): boolean {
+  return STORAGE_TYPE !== 'localstorage' && hasSignedInAccount();
+}
+
+/** Khách chỉ dùng dữ liệu trong phiên tab hiện tại. */
+function getVisitorDataStorage(): Storage | null {
+  if (typeof window === 'undefined') return null;
+  return sessionStorage;
+}
+
 // ---- API ----
 /**
  * 读取全部播放记录。
@@ -508,7 +523,7 @@ export async function getAllPlayRecords(): Promise<Record<string, PlayRecord>> {
   }
 
   // 数据库存储模式：使用混合缓存策略（包括 redis 和 upstash）
-  if (STORAGE_TYPE !== 'localstorage') {
+  if (usesPersistentAccountStorage()) {
     // 优先从缓存获取数据
     const cachedData = cacheManager.getCachedPlayRecords();
 
@@ -551,7 +566,8 @@ export async function getAllPlayRecords(): Promise<Record<string, PlayRecord>> {
 
   // localstorage 模式
   try {
-    const raw = localStorage.getItem(PLAY_RECORDS_KEY);
+    const storage = getVisitorDataStorage();
+    const raw = storage?.getItem(PLAY_RECORDS_KEY);
     if (!raw) return {};
     return JSON.parse(raw) as Record<string, PlayRecord>;
   } catch (err) {
@@ -573,7 +589,7 @@ export async function savePlayRecord(
   const key = generateStorageKey(source, id);
 
   // 数据库存储模式：乐观更新策略（包括 redis 和 upstash）
-  if (STORAGE_TYPE !== 'localstorage') {
+  if (usesPersistentAccountStorage()) {
     // 立即更新缓存
     const cachedRecords = cacheManager.getCachedPlayRecords() || {};
     cachedRecords[key] = record;
@@ -612,7 +628,10 @@ export async function savePlayRecord(
   try {
     const allRecords = await getAllPlayRecords();
     allRecords[key] = record;
-    localStorage.setItem(PLAY_RECORDS_KEY, JSON.stringify(allRecords));
+    getVisitorDataStorage()?.setItem(
+      PLAY_RECORDS_KEY,
+      JSON.stringify(allRecords)
+    );
     window.dispatchEvent(
       new CustomEvent('playRecordsUpdated', {
         detail: allRecords,
@@ -636,7 +655,7 @@ export async function deletePlayRecord(
   const key = generateStorageKey(source, id);
 
   // 数据库存储模式：乐观更新策略（包括 redis 和 upstash）
-  if (STORAGE_TYPE !== 'localstorage') {
+  if (usesPersistentAccountStorage()) {
     // 立即更新缓存
     const cachedRecords = cacheManager.getCachedPlayRecords() || {};
     delete cachedRecords[key];
@@ -671,7 +690,10 @@ export async function deletePlayRecord(
   try {
     const allRecords = await getAllPlayRecords();
     delete allRecords[key];
-    localStorage.setItem(PLAY_RECORDS_KEY, JSON.stringify(allRecords));
+    getVisitorDataStorage()?.setItem(
+      PLAY_RECORDS_KEY,
+      JSON.stringify(allRecords)
+    );
     window.dispatchEvent(
       new CustomEvent('playRecordsUpdated', {
         detail: allRecords,
@@ -697,7 +719,7 @@ export async function getSearchHistory(): Promise<string[]> {
   }
 
   // 数据库存储模式：使用混合缓存策略（包括 redis 和 upstash）
-  if (STORAGE_TYPE !== 'localstorage') {
+  if (usesPersistentAccountStorage()) {
     // 优先从缓存获取数据
     const cachedData = cacheManager.getCachedSearchHistory();
 
@@ -738,7 +760,8 @@ export async function getSearchHistory(): Promise<string[]> {
 
   // localStorage 模式
   try {
-    const raw = localStorage.getItem(SEARCH_HISTORY_KEY);
+    const storage = getVisitorDataStorage();
+    const raw = storage?.getItem(SEARCH_HISTORY_KEY);
     if (!raw) return [];
     const arr = JSON.parse(raw) as string[];
     // 仅返回字符串数组
@@ -759,7 +782,7 @@ export async function addSearchHistory(keyword: string): Promise<void> {
   if (!trimmed) return;
 
   // 数据库存储模式：乐观更新策略（包括 redis 和 upstash）
-  if (STORAGE_TYPE !== 'localstorage') {
+  if (usesPersistentAccountStorage()) {
     // 立即更新缓存
     const cachedHistory = cacheManager.getCachedSearchHistory() || [];
     const newHistory = [trimmed, ...cachedHistory.filter((k) => k !== trimmed)];
@@ -801,7 +824,10 @@ export async function addSearchHistory(keyword: string): Promise<void> {
     if (newHistory.length > SEARCH_HISTORY_LIMIT) {
       newHistory.length = SEARCH_HISTORY_LIMIT;
     }
-    localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(newHistory));
+    getVisitorDataStorage()?.setItem(
+      SEARCH_HISTORY_KEY,
+      JSON.stringify(newHistory)
+    );
     window.dispatchEvent(
       new CustomEvent('searchHistoryUpdated', {
         detail: newHistory,
@@ -819,7 +845,7 @@ export async function addSearchHistory(keyword: string): Promise<void> {
  */
 export async function clearSearchHistory(): Promise<void> {
   // 数据库存储模式：乐观更新策略（包括 redis 和 upstash）
-  if (STORAGE_TYPE !== 'localstorage') {
+  if (usesPersistentAccountStorage()) {
     // 立即更新缓存
     cacheManager.cacheSearchHistory([]);
 
@@ -843,7 +869,7 @@ export async function clearSearchHistory(): Promise<void> {
 
   // localStorage 模式
   if (typeof window === 'undefined') return;
-  localStorage.removeItem(SEARCH_HISTORY_KEY);
+  getVisitorDataStorage()?.removeItem(SEARCH_HISTORY_KEY);
   window.dispatchEvent(
     new CustomEvent('searchHistoryUpdated', {
       detail: [],
@@ -860,7 +886,7 @@ export async function deleteSearchHistory(keyword: string): Promise<void> {
   if (!trimmed) return;
 
   // 数据库存储模式：乐观更新策略（包括 redis 和 upstash）
-  if (STORAGE_TYPE !== 'localstorage') {
+  if (usesPersistentAccountStorage()) {
     // 立即更新缓存
     const cachedHistory = cacheManager.getCachedSearchHistory() || [];
     const newHistory = cachedHistory.filter((k) => k !== trimmed);
@@ -893,7 +919,10 @@ export async function deleteSearchHistory(keyword: string): Promise<void> {
   try {
     const history = await getSearchHistory();
     const newHistory = history.filter((k) => k !== trimmed);
-    localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(newHistory));
+    getVisitorDataStorage()?.setItem(
+      SEARCH_HISTORY_KEY,
+      JSON.stringify(newHistory)
+    );
     window.dispatchEvent(
       new CustomEvent('searchHistoryUpdated', {
         detail: newHistory,
@@ -918,7 +947,7 @@ export async function getAllFavorites(): Promise<Record<string, Favorite>> {
   }
 
   // 数据库存储模式：使用混合缓存策略（包括 redis 和 upstash）
-  if (STORAGE_TYPE !== 'localstorage') {
+  if (usesPersistentAccountStorage()) {
     // 优先从缓存获取数据
     const cachedData = cacheManager.getCachedFavorites();
 
@@ -961,7 +990,8 @@ export async function getAllFavorites(): Promise<Record<string, Favorite>> {
 
   // localStorage 模式
   try {
-    const raw = localStorage.getItem(FAVORITES_KEY);
+    const storage = getVisitorDataStorage();
+    const raw = storage?.getItem(FAVORITES_KEY);
     if (!raw) return {};
     return JSON.parse(raw) as Record<string, Favorite>;
   } catch (err) {
@@ -983,7 +1013,7 @@ export async function saveFavorite(
   const key = generateStorageKey(source, id);
 
   // 数据库存储模式：乐观更新策略（包括 redis 和 upstash）
-  if (STORAGE_TYPE !== 'localstorage') {
+  if (usesPersistentAccountStorage()) {
     // 立即更新缓存
     const cachedFavorites = cacheManager.getCachedFavorites() || {};
     cachedFavorites[key] = favorite;
@@ -1022,7 +1052,10 @@ export async function saveFavorite(
   try {
     const allFavorites = await getAllFavorites();
     allFavorites[key] = favorite;
-    localStorage.setItem(FAVORITES_KEY, JSON.stringify(allFavorites));
+    getVisitorDataStorage()?.setItem(
+      FAVORITES_KEY,
+      JSON.stringify(allFavorites)
+    );
     window.dispatchEvent(
       new CustomEvent('favoritesUpdated', {
         detail: allFavorites,
@@ -1046,7 +1079,7 @@ export async function deleteFavorite(
   const key = generateStorageKey(source, id);
 
   // 数据库存储模式：乐观更新策略（包括 redis 和 upstash）
-  if (STORAGE_TYPE !== 'localstorage') {
+  if (usesPersistentAccountStorage()) {
     // 立即更新缓存
     const cachedFavorites = cacheManager.getCachedFavorites() || {};
     delete cachedFavorites[key];
@@ -1081,7 +1114,10 @@ export async function deleteFavorite(
   try {
     const allFavorites = await getAllFavorites();
     delete allFavorites[key];
-    localStorage.setItem(FAVORITES_KEY, JSON.stringify(allFavorites));
+    getVisitorDataStorage()?.setItem(
+      FAVORITES_KEY,
+      JSON.stringify(allFavorites)
+    );
     window.dispatchEvent(
       new CustomEvent('favoritesUpdated', {
         detail: allFavorites,
@@ -1104,7 +1140,7 @@ export async function deleteFavoriteByTitle(title: string): Promise<void> {
   const key = generateStorageKey(sourceForDb, idForDb);
 
   // 数据库存储模式：乐观更新策略（包括 redis 和 upstash）
-  if (STORAGE_TYPE !== 'localstorage') {
+  if (usesPersistentAccountStorage()) {
     const cachedFavorites = cacheManager.getCachedFavorites() || {};
     if (cachedFavorites[key]) {
       delete cachedFavorites[key];
@@ -1139,7 +1175,10 @@ export async function deleteFavoriteByTitle(title: string): Promise<void> {
     const allFavorites = await getAllFavorites();
     if (allFavorites[key]) {
       delete allFavorites[key];
-      localStorage.setItem(FAVORITES_KEY, JSON.stringify(allFavorites));
+      getVisitorDataStorage()?.setItem(
+        FAVORITES_KEY,
+        JSON.stringify(allFavorites)
+      );
       window.dispatchEvent(
         new CustomEvent('favoritesUpdated', {
           detail: allFavorites,
@@ -1164,7 +1203,7 @@ export async function isFavorited(
   const key = generateStorageKey(source, id);
 
   // 数据库存储模式：使用混合缓存策略（包括 redis 和 upstash）
-  if (STORAGE_TYPE !== 'localstorage') {
+  if (usesPersistentAccountStorage()) {
     const cachedFavorites = cacheManager.getCachedFavorites();
 
     if (cachedFavorites) {
@@ -1215,7 +1254,7 @@ export async function isFavorited(
  */
 export async function clearAllPlayRecords(): Promise<void> {
   // 数据库存储模式：乐观更新策略（包括 redis 和 upstash）
-  if (STORAGE_TYPE !== 'localstorage') {
+  if (usesPersistentAccountStorage()) {
     // 立即更新缓存
     cacheManager.cachePlayRecords({});
 
@@ -1242,7 +1281,7 @@ export async function clearAllPlayRecords(): Promise<void> {
 
   // localStorage 模式
   if (typeof window === 'undefined') return;
-  localStorage.removeItem(PLAY_RECORDS_KEY);
+  getVisitorDataStorage()?.removeItem(PLAY_RECORDS_KEY);
   window.dispatchEvent(
     new CustomEvent('playRecordsUpdated', {
       detail: {},
@@ -1256,7 +1295,7 @@ export async function clearAllPlayRecords(): Promise<void> {
  */
 export async function clearAllFavorites(): Promise<void> {
   // 数据库存储模式：乐观更新策略（包括 redis 和 upstash）
-  if (STORAGE_TYPE !== 'localstorage') {
+  if (usesPersistentAccountStorage()) {
     // 立即更新缓存
     cacheManager.cacheFavorites({});
 
@@ -1283,7 +1322,7 @@ export async function clearAllFavorites(): Promise<void> {
 
   // localStorage 模式
   if (typeof window === 'undefined') return;
-  localStorage.removeItem(FAVORITES_KEY);
+  getVisitorDataStorage()?.removeItem(FAVORITES_KEY);
   window.dispatchEvent(
     new CustomEvent('favoritesUpdated', {
       detail: {},
@@ -1298,7 +1337,7 @@ export async function clearAllFavorites(): Promise<void> {
  * 用于用户注销退出时清理缓存
  */
 export function clearUserCache(): void {
-  if (STORAGE_TYPE !== 'localstorage') {
+  if (usesPersistentAccountStorage()) {
     cacheManager.clearUserCache();
   }
 }
@@ -1308,7 +1347,7 @@ export function clearUserCache(): void {
  * 强制从服务器重新获取数据并更新缓存
  */
 export async function refreshAllCache(): Promise<void> {
-  if (STORAGE_TYPE === 'localstorage') return;
+  if (!usesPersistentAccountStorage()) return;
 
   try {
     // 并行刷新所有数据
@@ -1372,7 +1411,7 @@ export function getCacheStatus(): {
   hasSkipConfigs: boolean;
   username: string | null;
 } {
-  if (STORAGE_TYPE === 'localstorage') {
+  if (!usesPersistentAccountStorage()) {
     return {
       hasPlayRecords: false,
       hasFavorites: false,
@@ -1435,7 +1474,7 @@ export function subscribeToDataUpdates<T>(
  * 适合在应用启动时调用，提升后续访问速度
  */
 export async function preloadUserData(): Promise<void> {
-  if (STORAGE_TYPE === 'localstorage') return;
+  if (!usesPersistentAccountStorage()) return;
 
   // 检查是否已有有效缓存，避免重复请求
   const status = getCacheStatus();
@@ -1473,7 +1512,7 @@ export async function getSkipConfig(
   const key = generateStorageKey(source, id);
 
   // 数据库存储模式：使用混合缓存策略（包括 redis 和 upstash）
-  if (STORAGE_TYPE !== 'localstorage') {
+  if (usesPersistentAccountStorage()) {
     // 优先从缓存获取数据
     const cachedData = cacheManager.getCachedSkipConfigs();
 
@@ -1513,9 +1552,9 @@ export async function getSkipConfig(
     }
   }
 
-  // localStorage 模式
+  // Khách chỉ giữ cấu hình trong phiên tab hiện tại.
   try {
-    const raw = localStorage.getItem('moontv_skip_configs');
+    const raw = getVisitorDataStorage()?.getItem('moontv_skip_configs');
     if (!raw) return null;
     const configs = JSON.parse(raw) as Record<string, SkipConfig>;
     return configs[key] || null;
@@ -1538,7 +1577,7 @@ export async function saveSkipConfig(
   const key = generateStorageKey(source, id);
 
   // 数据库存储模式：乐观更新策略（包括 redis 和 upstash）
-  if (STORAGE_TYPE !== 'localstorage') {
+  if (usesPersistentAccountStorage()) {
     // 立即更新缓存
     const cachedConfigs = cacheManager.getCachedSkipConfigs() || {};
     cachedConfigs[key] = config;
@@ -1567,17 +1606,19 @@ export async function saveSkipConfig(
     return;
   }
 
-  // localStorage 模式
+  // Khách chỉ giữ cấu hình trong phiên tab hiện tại.
   if (typeof window === 'undefined') {
     console.warn('无法在服务端保存跳过片头片尾配置到 localStorage');
     return;
   }
 
   try {
-    const raw = localStorage.getItem('moontv_skip_configs');
+    const storage = getVisitorDataStorage();
+    if (!storage) return;
+    const raw = storage.getItem('moontv_skip_configs');
     const configs = raw ? (JSON.parse(raw) as Record<string, SkipConfig>) : {};
     configs[key] = config;
-    localStorage.setItem('moontv_skip_configs', JSON.stringify(configs));
+    storage.setItem('moontv_skip_configs', JSON.stringify(configs));
     window.dispatchEvent(
       new CustomEvent('skipConfigsUpdated', {
         detail: configs,
@@ -1601,7 +1642,7 @@ export async function getAllSkipConfigs(): Promise<Record<string, SkipConfig>> {
   }
 
   // 数据库存储模式：使用混合缓存策略（包括 redis 和 upstash）
-  if (STORAGE_TYPE !== 'localstorage') {
+  if (usesPersistentAccountStorage()) {
     // 优先从缓存获取数据
     const cachedData = cacheManager.getCachedSkipConfigs();
 
@@ -1642,9 +1683,9 @@ export async function getAllSkipConfigs(): Promise<Record<string, SkipConfig>> {
     }
   }
 
-  // localStorage 模式
+  // Khách chỉ giữ cấu hình trong phiên tab hiện tại.
   try {
-    const raw = localStorage.getItem('moontv_skip_configs');
+    const raw = getVisitorDataStorage()?.getItem('moontv_skip_configs');
     if (!raw) return {};
     return JSON.parse(raw) as Record<string, SkipConfig>;
   } catch (err) {
@@ -1665,7 +1706,7 @@ export async function deleteSkipConfig(
   const key = generateStorageKey(source, id);
 
   // 数据库存储模式：乐观更新策略（包括 redis 和 upstash）
-  if (STORAGE_TYPE !== 'localstorage') {
+  if (usesPersistentAccountStorage()) {
     // 立即更新缓存
     const cachedConfigs = cacheManager.getCachedSkipConfigs() || {};
     delete cachedConfigs[key];
@@ -1690,18 +1731,20 @@ export async function deleteSkipConfig(
     return;
   }
 
-  // localStorage 模式
+  // Khách chỉ giữ cấu hình trong phiên tab hiện tại.
   if (typeof window === 'undefined') {
     console.warn('无法在服务端删除跳过片头片尾配置到 localStorage');
     return;
   }
 
   try {
-    const raw = localStorage.getItem('moontv_skip_configs');
+    const storage = getVisitorDataStorage();
+    if (!storage) return;
+    const raw = storage.getItem('moontv_skip_configs');
     if (raw) {
       const configs = JSON.parse(raw) as Record<string, SkipConfig>;
       delete configs[key];
-      localStorage.setItem('moontv_skip_configs', JSON.stringify(configs));
+      storage.setItem('moontv_skip_configs', JSON.stringify(configs));
       window.dispatchEvent(
         new CustomEvent('skipConfigsUpdated', {
           detail: configs,

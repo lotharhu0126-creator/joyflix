@@ -6,7 +6,7 @@ import { db } from '@/lib/db';
 import { fetchVideoDetail } from '@/lib/fetchVideoDetail';
 import { SearchResult } from '@/lib/types';
 
-export const runtime = 'edge';
+export const runtime = 'nodejs';
 
 export async function GET(request: NextRequest) {
   console.log(request.url);
@@ -36,9 +36,7 @@ export async function GET(request: NextRequest) {
 }
 
 async function refreshRecordAndFavorites() {
-  if (
-    (process.env.NEXT_PUBLIC_STORAGE_TYPE || 'localstorage') === 'localstorage'
-  ) {
+  if ((process.env.NEXT_PUBLIC_STORAGE_TYPE || 'sqlite') === 'localstorage') {
     console.log('跳过刷新：当前使用 localstorage 存储模式');
     return;
   }

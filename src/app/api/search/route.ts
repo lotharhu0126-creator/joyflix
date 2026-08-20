@@ -1,14 +1,15 @@
 /* eslint-disable @typescript-eslint/no-explicit-any,no-console */
 
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 
+import { filterAdultResults } from '@/lib/adult-content';
+import { hasValidAccountSession } from '@/lib/auth';
 import { getCacheTime, getConfig } from '@/lib/config';
 import { searchFromApi } from '@/lib/downstream';
 
+export const runtime = 'nodejs';
 
-export const runtime = 'edge';
-
-export async function GET(request: Request) {
+export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const query = searchParams.get('q');
 
@@ -47,18 +48,16 @@ export async function GET(request: Request) {
     const successResults = results
       .filter((result) => result.status === 'fulfilled')
       .map((result) => (result as PromiseFulfilledResult<any>).value);
-    let flattenedResults = successResults.flat();
-    
-    const cacheTime = await getCacheTime();
+    const flattenedResults = filterAdultResults(
+      successResults.flat(),
+      await hasValidAccountSession(request)
+    );
 
     return NextResponse.json(
       { results: flattenedResults },
       {
         headers: {
-          'Cache-Control': `public, max-age=${cacheTime}, s-maxage=${cacheTime}`,
-          'CDN-Cache-Control': `public, s-maxage=${cacheTime}`,
-          'Vercel-CDN-Cache-Control': `public, s-maxage=${cacheTime}`,
-          'Netlify-Vary': 'query',
+          'Cache-Control': 'private, no-store',
         },
       }
     );

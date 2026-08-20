@@ -109,6 +109,8 @@ export interface SearchResult {
   year: string;
   desc?: string;
   type_name?: string;
+  /** Mã danh mục do nguồn VOD trả về, dùng để áp dụng quyền xem nội dung. */
+  type_id?: number;
   douban_id?: number;
   country?: string;
   runtime?: string;

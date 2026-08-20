@@ -6,10 +6,10 @@ import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getStorage } from '@/lib/db';
 import { IStorage } from '@/lib/types';
 
-export const runtime = 'edge';
+export const runtime = 'nodejs';
 
 export async function POST(request: NextRequest) {
-  const storageType = process.env.NEXT_PUBLIC_STORAGE_TYPE || 'localstorage';
+  const storageType = process.env.NEXT_PUBLIC_STORAGE_TYPE || 'sqlite';
 
   // 不支持 localstorage 模式
   if (storageType === 'localstorage') {
@@ -32,8 +32,16 @@ export async function POST(request: NextRequest) {
     }
 
     // 验证新密码
-    if (!newPassword || typeof newPassword !== 'string') {
-      return NextResponse.json({ error: '新密码不得为空' }, { status: 400 });
+    if (
+      !newPassword ||
+      typeof newPassword !== 'string' ||
+      newPassword.length < 8 ||
+      newPassword.length > 128
+    ) {
+      return NextResponse.json(
+        { error: 'Mật khẩu phải dài từ 8 đến 128 ký tự' },
+        { status: 400 }
+      );
     }
 
     const username = authInfo.username;

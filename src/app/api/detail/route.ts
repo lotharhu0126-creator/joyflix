@@ -1,11 +1,13 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 
+import { isAdultResult } from '@/lib/adult-content';
+import { hasValidAccountSession } from '@/lib/auth';
 import { getAvailableApiSites, getCacheTime } from '@/lib/config';
 import { getDetailFromApi } from '@/lib/downstream';
 
-export const runtime = 'edge';
+export const runtime = 'nodejs';
 
-export async function GET(request: Request) {
+export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const id = searchParams.get('id');
   const sourceCode = searchParams.get('source');
@@ -27,14 +29,26 @@ export async function GET(request: Request) {
     }
 
     const result = await getDetailFromApi(apiSite, id);
+    if (isAdultResult(result) && !(await hasValidAccountSession(request))) {
+      return NextResponse.json(
+        { error: 'Không tìm thấy nội dung' },
+        { status: 404 }
+      );
+    }
     const cacheTime = await getCacheTime();
 
     return NextResponse.json(result, {
       headers: {
-        'Cache-Control': `public, max-age=${cacheTime}, s-maxage=${cacheTime}`,
-        'CDN-Cache-Control': `public, s-maxage=${cacheTime}`,
-        'Vercel-CDN-Cache-Control': `public, s-maxage=${cacheTime}`,
-        'Netlify-Vary': 'query',
+        'Cache-Control': isAdultResult(result)
+          ? 'private, no-store'
+          : `public, max-age=${cacheTime}, s-maxage=${cacheTime}`,
+        ...(isAdultResult(result)
+          ? {}
+          : {
+              'CDN-Cache-Control': `public, s-maxage=${cacheTime}`,
+              'Vercel-CDN-Cache-Control': `public, s-maxage=${cacheTime}`,
+              'Netlify-Vary': 'query',
+            }),
       },
     });
   } catch (error) {

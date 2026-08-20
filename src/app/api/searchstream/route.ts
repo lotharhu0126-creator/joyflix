@@ -1,12 +1,16 @@
 /* eslint-disable @typescript-eslint/no-explicit-any,no-console */
 
-import { getCacheTime, getConfig } from '@/lib/config';
+import { filterAdultResults } from '@/lib/adult-content';
+import { hasValidAccountSession } from '@/lib/auth';
+import { NextRequest } from 'next/server';
+
+import { getConfig } from '@/lib/config';
 import { searchFromApi } from '@/lib/downstream';
 import { SearchResult } from '@/lib/types';
 
-export const runtime = 'edge';
+export const runtime = 'nodejs';
 
-export async function GET(request: Request) {
+export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const query = searchParams.get('q');
 
@@ -18,7 +22,7 @@ export async function GET(request: Request) {
 
   const config = await getConfig();
   const apiSites = config.SourceConfig.filter((site) => !site.disabled);
-  const cacheTime = await getCacheTime();
+  const includeAdult = await hasValidAccountSession(request);
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -33,8 +37,12 @@ export async function GET(request: Request) {
             ),
           ]);
 
-          if (results && results.length > 0) {
-            const chunk = encoder.encode(JSON.stringify(results) + '\n');
+          const visibleResults = filterAdultResults(
+            results || [],
+            includeAdult
+          );
+          if (visibleResults.length > 0) {
+            const chunk = encoder.encode(JSON.stringify(visibleResults) + '\n');
             controller.enqueue(chunk);
           }
         } catch (err: any) {
@@ -51,9 +59,7 @@ export async function GET(request: Request) {
   return new Response(stream, {
     headers: {
       'Content-Type': 'application/octet-stream',
-      'Cache-Control': `public, max-age=${cacheTime}, s-maxage=${cacheTime}`,
-      'CDN-Cache-Control': `public, s-maxage=${cacheTime}`,
-      'Vercel-CDN-Cache-Control': `public, s-maxage=${cacheTime}`,
+      'Cache-Control': 'private, no-store',
     },
   });
 }

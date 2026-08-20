@@ -14,7 +14,7 @@ import {
   subscribeToDataUpdates,
 } from '@/lib/db.client';
 import { SearchResult } from '@/lib/types';
-import { processImageUrl } from '@/lib/utils';
+import { getPosterBlurDataUrl, processImageUrl } from '@/lib/utils';
 
 import { ImagePlaceholder } from '@/components/ImagePlaceholder';
 
@@ -37,6 +37,7 @@ interface VideoCardProps {
   items?: SearchResult[];
   type?: string;
   isBangumi?: boolean;
+  priority?: boolean;
 }
 
 export default function VideoCard({
@@ -58,6 +59,7 @@ export default function VideoCard({
   items,
   type = '',
   isBangumi = false,
+  priority = false,
 }: VideoCardProps) {
   const isValidArabicYear = (year: string | undefined) => {
     if (!year) return false;
@@ -66,13 +68,15 @@ export default function VideoCard({
 
   const router = useRouter();
   const [favorited, setFavorited] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
   const [isTablet, setIsTablet] = useState(false);
 
   useEffect(() => {
     const userAgent = navigator.userAgent;
     const hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
-    const isTabletDevice = (/(ipad|tablet|(android(?!.*mobile))|(windows(?!.*phone)(.*touch))|((macintosh.*(?!mobile).*safari.*(?!iphone|ipod))))/i.test(userAgent)) && hasTouch;
+    const isTabletDevice =
+      /(ipad|tablet|(android(?!.*mobile))|(windows(?!.*phone)(.*touch))|((macintosh.*(?!mobile).*safari.*(?!iphone|ipod))))/i.test(
+        userAgent
+      ) && hasTouch;
     setIsTablet(isTabletDevice);
   }, []);
 
@@ -80,15 +84,27 @@ export default function VideoCard({
 
   const aggregateData = useMemo(() => {
     if (!isAggregate || !items) return null;
+    const orderedItems = [...items].sort((left, right) => {
+      const leftEpisodes = left.episodes?.length || 0;
+      const rightEpisodes = right.episodes?.length || 0;
+      if (leftEpisodes !== rightEpisodes) return rightEpisodes - leftEpisodes;
+      if (left.source === 'bdzy' && right.source !== 'bdzy') return -1;
+      if (right.source === 'bdzy' && left.source !== 'bdzy') return 1;
+      return left.source_name.localeCompare(right.source_name);
+    });
     const countMap = new Map<number, number>();
     const episodeCountMap = new Map<number, number>();
-    items.forEach((item) => {
+    const sourceOptions = new Map<string, SearchResult>();
+    orderedItems.forEach((item) => {
       if (item.douban_id && item.douban_id !== 0) {
         countMap.set(item.douban_id, (countMap.get(item.douban_id) || 0) + 1);
       }
       const len = item.episodes?.length || 0;
       if (len > 0) {
         episodeCountMap.set(len, (episodeCountMap.get(len) || 0) + 1);
+      }
+      if (!sourceOptions.has(item.source)) {
+        sourceOptions.set(item.source, item);
       }
     });
 
@@ -105,15 +121,17 @@ export default function VideoCard({
     };
 
     return {
-      first: items[0],
+      first: orderedItems[0],
       mostFrequentDoubanId: getMostFrequent(countMap),
       mostFrequentEpisodes: getMostFrequent(episodeCountMap) || 0,
+      sourceOptions: Array.from(sourceOptions.values()),
     };
   }, [isAggregate, items]);
 
   const actualTitle = aggregateData?.first.title ?? title;
   const actualPoster = aggregateData?.first.poster ?? poster;
   const actualSource = aggregateData?.first.source ?? source;
+  const actualSourceName = aggregateData?.first.source_name ?? source_name;
   const actualId = aggregateData?.first.id ?? id;
   const actualDoubanId = aggregateData?.mostFrequentDoubanId ?? douban_id;
   const actualEpisodes = aggregateData?.mostFrequentEpisodes ?? episodes;
@@ -124,6 +142,10 @@ export default function VideoCard({
       ? 'movie'
       : 'tv'
     : type;
+  const posterBlurDataUrl = useMemo(
+    () => getPosterBlurDataUrl(`${actualTitle}|${actualPoster}`),
+    [actualPoster, actualTitle]
+  );
 
   // 获取收藏状态
   useEffect(() => {
@@ -206,6 +228,25 @@ export default function VideoCard({
       }
     },
     [from, actualSource, actualId, onDelete]
+  );
+
+  const handleSelectSource = useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>, item: SearchResult) => {
+      event.preventDefault();
+      event.stopPropagation();
+      onNavigate?.();
+
+      const params = new URLSearchParams({
+        source: item.source,
+        id: item.id,
+        title: item.title,
+      });
+      if (item.year) params.set('year', item.year);
+      if (item.poster) params.set('poster', item.poster);
+      params.set('stype', item.episodes.length > 1 ? 'tv' : 'movie');
+      router.push(`/detail?${params.toString()}`);
+    },
+    [onNavigate, router]
   );
 
   const handleClick = useCallback(() => {
@@ -328,7 +369,7 @@ export default function VideoCard({
         showPlayButton: true,
         showHeart: false,
         showCheckCircle: true,
-        
+
         showRating: false,
       },
       favorite: {
@@ -337,7 +378,7 @@ export default function VideoCard({
         showPlayButton: true,
         showHeart: false,
         showCheckCircle: true,
-        
+
         showRating: false,
       },
       search: {
@@ -346,7 +387,7 @@ export default function VideoCard({
         showPlayButton: true,
         showHeart: !isAggregate,
         showCheckCircle: false,
-        
+
         showRating: false,
       },
       douban: {
@@ -355,7 +396,7 @@ export default function VideoCard({
         showPlayButton: true,
         showHeart: false,
         showCheckCircle: false,
-        
+
         showRating: !!rate,
       },
       recommendation: {
@@ -364,7 +405,7 @@ export default function VideoCard({
         showPlayButton: false,
         showHeart: false,
         showCheckCircle: false,
-        
+
         showRating: !!rate,
       },
     };
@@ -373,50 +414,55 @@ export default function VideoCard({
 
   return (
     <div
-      className='group relative w-full rounded-lg bg-transparent cursor-pointer transition-all duration-300 ease-in-out hover:scale-[1.05] hover:z-[500]'
+      className="group relative w-full rounded-lg bg-transparent cursor-pointer transition-all duration-300 ease-in-out hover:scale-[1.05] hover:z-[500]"
       onClick={handleClick}
     >
       {/* 海报容器 */}
-      <div className='relative aspect-[2/3] overflow-hidden rounded-lg'>
-        {/* 骨架屏 */}
-        {!isLoading && <ImagePlaceholder aspectRatio='aspect-[2/3]' />}
-        {/* 图片 */}
-        <Image
-          src={processImageUrl(actualPoster)}
-          alt={actualTitle}
-          fill
-          className='object-cover'
-          referrerPolicy='no-referrer'
-          loading='lazy'
-          onLoadingComplete={() => setIsLoading(true)}
-          onError={(e) => {
-            // 图片加载失败时的重试机制
-            const img = e.target as HTMLImageElement;
-            if (!img.dataset.retried) {
-              img.dataset.retried = 'true';
-              setTimeout(() => {
-                img.src = processImageUrl(actualPoster);
-              }, 2000);
-            }
-          }}
-        />
+      <div className="relative aspect-[2/3] overflow-hidden rounded-lg">
+        {actualPoster ? (
+          <Image
+            src={processImageUrl(actualPoster)}
+            alt={actualTitle}
+            fill
+            className="object-cover"
+            referrerPolicy="no-referrer"
+            placeholder="blur"
+            blurDataURL={posterBlurDataUrl}
+            priority={priority}
+            loading={priority ? 'eager' : 'lazy'}
+            sizes="(max-width: 640px) 96px, 176px"
+            onError={(e) => {
+              // 图片加载失败时的重试机制
+              const img = e.target as HTMLImageElement;
+              if (!img.dataset.retried) {
+                img.dataset.retried = 'true';
+                setTimeout(() => {
+                  img.src = processImageUrl(actualPoster);
+                }, 2000);
+              }
+            }}
+          />
+        ) : (
+          <ImagePlaceholder aspectRatio="aspect-[2/3]" />
+        )}
 
         {/* 悬浮遮罩 */}
-        <div className='absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent opacity-0 transition-opacity duration-300 ease-in-out group-hover:opacity-100' />
+        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent opacity-0 transition-opacity duration-300 ease-in-out group-hover:opacity-100" />
 
         {/* 播放按钮 */}
         {config.showPlayButton && !isTablet && (
-          <div className='absolute inset-0 flex items-center justify-center opacity-0 transition-all duration-300 ease-in-out delay-75 group-hover:opacity-100 group-hover:scale-100'>
+          <div className="absolute inset-0 flex items-center justify-center opacity-0 transition-all duration-300 ease-in-out delay-75 group-hover:opacity-100 group-hover:scale-100">
             <PlayCircleIcon
               size={50}
               strokeWidth={0.8}
-              className='text-white fill-transparent transition-all duration-300 ease-out hover:fill-blue-400 hover:scale-[1.1] hidden sm:block'
+              className="text-white fill-transparent transition-all duration-300 ease-out hover:fill-blue-400 hover:scale-[1.1] hidden sm:block"
               onClick={(e) => {
                 e.stopPropagation(); // Prevent card click
                 onNavigate?.(); // Call onNavigate before navigating to /play
 
                 if (from === 'favorite') {
-                  if (source_name === '收藏') { // 新增条件
+                  if (source_name === '收藏') {
+                    // 新增条件
                     // 如果是自定义收藏，始终跳转到详情页
                     handleClick();
                   } else {
@@ -456,7 +502,7 @@ export default function VideoCard({
 
         {/* 操作按钮 */}
         {(config.showHeart || config.showCheckCircle) && (
-          <div className='absolute bottom-3 right-3 flex gap-3 opacity-0 translate-y-2 transition-all duration-300 ease-in-out group-hover:opacity-100 group-hover:translate-y-0'>
+          <div className="absolute bottom-3 right-3 flex gap-3 opacity-0 translate-y-2 transition-all duration-300 ease-in-out group-hover:opacity-100 group-hover:translate-y-0">
             {config.showHeart && (
               <Heart
                 onClick={handleToggleFavorite}
@@ -470,9 +516,13 @@ export default function VideoCard({
             )}
             {config.showCheckCircle && (
               <Trash2
-                onClick={from === 'favorite' ? handleToggleFavorite : handleDeleteRecord}
+                onClick={
+                  from === 'favorite'
+                    ? handleToggleFavorite
+                    : handleDeleteRecord
+                }
                 size={20}
-                className='text-white transition-all duration-300 ease-out hover:stroke-red-500 hover:scale-[1.1]'
+                className="text-white transition-all duration-300 ease-out hover:stroke-red-500 hover:scale-[1.1]"
               />
             )}
           </div>
@@ -480,55 +530,88 @@ export default function VideoCard({
 
         {/* 徽章 */}
         {config.showRating && rate && (
-          <div className='absolute top-2 right-2 bg-[#ff9f43] text-white text-xs font-bold w-7 h-7 rounded-full flex items-center justify-center shadow-md transition-all duration-300 ease-out group-hover:scale-110'>
+          <div className="absolute top-2 right-2 bg-[#ff9f43] text-white text-xs font-bold w-7 h-7 rounded-full flex items-center justify-center shadow-md transition-all duration-300 ease-out group-hover:scale-110">
             {rate}
           </div>
         )}
 
         {actualEpisodes && actualEpisodes > 1 && (
-          <div className='absolute top-2 right-2 bg-blue-400 text-white text-xs font-semibold px-2 py-1 rounded-md shadow-md transition-all duration-300 ease-out group-hover:scale-110'>
+          <div className="absolute top-2 right-2 bg-blue-400 text-white text-xs font-semibold px-2 py-1 rounded-md shadow-md transition-all duration-300 ease-out group-hover:scale-110">
             {currentEpisode
               ? `${currentEpisode}/${actualEpisodes}`
               : actualEpisodes}
           </div>
         )}
-
-        
       </div>
 
       {/* 进度条 */}
       {config.showProgress && progress !== undefined && (
-        <div className='mt-1 h-1 w-full bg-gray-200 rounded-full overflow-hidden'>
+        <div className="mt-1 h-1 w-full bg-gray-200 rounded-full overflow-hidden">
           <div
-            className='h-full bg-blue-400 transition-all duration-500 ease-out'
+            className="h-full bg-blue-400 transition-all duration-500 ease-out"
             style={{ width: `${progress}%` }}
           />
         </div>
       )}
 
       {/* 标题、年份与来源 */}
-      <div className='mt-2 text-center'>
-        <div className='relative'>
-          <span className='block text-sm font-semibold truncate text-gray-900 dark:text-gray-100 transition-colors duration-300 ease-in-out group-hover:text-black dark:group-hover:text-white peer'>
+      <div className="mt-2 text-center">
+        <div className="relative">
+          <span className="block text-sm font-semibold truncate text-gray-900 dark:text-gray-100 transition-colors duration-300 ease-in-out group-hover:text-black dark:group-hover:text-white peer">
             {actualTitle}
           </span>
-          {actualYear && (from === 'douban' || from === 'search' || from === 'playrecord' || (from === 'favorite' && source_name === '收藏')) && isValidArabicYear(actualYear) && (
-            <span className='block text-xs text-gray-600 dark:text-gray-400 truncate w-full px-1'>
-              {actualYear}
-            </span>
-          )}
+          {actualYear &&
+            (from === 'douban' ||
+              from === 'search' ||
+              from === 'playrecord' ||
+              (from === 'favorite' && source_name === '收藏')) &&
+            isValidArabicYear(actualYear) && (
+              <span className="block text-xs text-gray-600 dark:text-gray-400 truncate w-full px-1">
+                {actualYear}
+              </span>
+            )}
           {/* 自定义 tooltip */}
-          <div className='absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-1 bg-gray-800 text-white text-xs rounded-md shadow-lg opacity-0 invisible peer-hover:opacity-100 peer-hover:visible transition-all duration-200 ease-out delay-100 whitespace-nowrap pointer-events-none'>
+          <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-1 bg-gray-800 text-white text-xs rounded-md shadow-lg opacity-0 invisible peer-hover:opacity-100 peer-hover:visible transition-all duration-200 ease-out delay-100 whitespace-nowrap pointer-events-none">
             {actualTitle}
-            <div className='absolute top-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-800'></div>
+            <div className="absolute top-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-800"></div>
           </div>
         </div>
-        {config.showSourceName && source_name && source_name !== '收藏' && (
-          <span className='block text-xs text-gray-500 dark:text-gray-400 mt-1'>
-            <span className='inline-block border rounded px-2 py-0.5 border-gray-500/60 dark:border-gray-400/60 transition-all duration-300 ease-in-out group-hover:border-gray-900/60 group-hover:text-gray-900 dark:group-hover:border-white/60 dark:group-hover:text-white'>
-              {source_name}
+        {isAggregate && (aggregateData?.sourceOptions.length || 0) > 1 ? (
+          <details
+            className="mt-1 text-xs text-gray-500 dark:text-gray-400"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <summary className="cursor-pointer select-none hover:text-blue-500 dark:hover:text-blue-300">
+              Chọn nguồn ({aggregateData?.sourceOptions.length})
+            </summary>
+            <div className="mt-1 flex flex-wrap justify-center gap-1.5">
+              {aggregateData?.sourceOptions.map((item) => (
+                <button
+                  key={item.source}
+                  type="button"
+                  onClick={(event) => handleSelectSource(event, item)}
+                  className={`rounded border px-1.5 py-0.5 text-[10px] transition-colors ${
+                    item.source === 'bdzy'
+                      ? 'border-blue-400/70 text-blue-500 hover:bg-blue-400 hover:text-white dark:text-blue-300'
+                      : 'border-gray-400/60 text-gray-500 hover:bg-gray-200 dark:border-gray-500 dark:text-gray-300 dark:hover:bg-gray-700'
+                  }`}
+                  title={`Mở từ ${item.source_name}`}
+                >
+                  {item.source_name}
+                </button>
+              ))}
+            </div>
+          </details>
+        ) : (
+          config.showSourceName &&
+          actualSourceName &&
+          actualSourceName !== '收藏' && (
+            <span className="block text-xs text-gray-500 dark:text-gray-400 mt-1">
+              <span className="inline-block border rounded px-2 py-0.5 border-gray-500/60 dark:border-gray-400/60 transition-all duration-300 ease-in-out group-hover:border-gray-900/60 group-hover:text-gray-900 dark:group-hover:border-white/60 dark:group-hover:text-white">
+                {actualSourceName}
+              </span>
             </span>
-          </span>
+          )
         )}
       </div>
     </div>
