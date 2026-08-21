@@ -1,5 +1,5 @@
 import { API_CONFIG, ApiSite, getConfig } from '@/lib/config';
-import { hasUsableBdzyPlayback } from '@/lib/bdzy-playback';
+import { getUsableBdzyEpisodes } from '@/lib/bdzy-playback';
 import { SearchResult } from '@/lib/types';
 import { cleanHtmlTags } from '@/lib/utils';
 
@@ -80,6 +80,10 @@ export async function searchFromApi(
             titles = matchTitles;
           }
         });
+      }
+
+      if (apiSite.key === 'bdzy') {
+        ({ episodes, titles } = getUsableBdzyEpisodes(episodes, titles));
       }
 
       return {
@@ -172,6 +176,10 @@ export async function searchFromApi(
                 });
               }
 
+              if (apiSite.key === 'bdzy') {
+                ({ episodes, titles } = getUsableBdzyEpisodes(episodes, titles));
+              }
+
               return {
                 id: item.vod_id.toString(),
                 title: item.vod_name.trim().replace(/\s+/g, ' '),
@@ -209,10 +217,7 @@ export async function searchFromApi(
       });
     }
 
-    return results.filter(
-      (result: SearchResult) =>
-        result.source !== 'bdzy' || hasUsableBdzyPlayback(result.episodes)
-    );
+    return results.filter((result: SearchResult) => result.episodes.length > 0);
   } catch (error) {
     return [];
   }
@@ -290,6 +295,10 @@ export async function getDetailFromApi(
   if (episodes.length === 0 && videoDetail.vod_content) {
     const matches = videoDetail.vod_content.match(M3U8_PATTERN) || [];
     episodes = matches.map((link: string) => link.replace(/^\$/, ''));
+  }
+
+  if (apiSite.key === 'bdzy') {
+    ({ episodes, titles } = getUsableBdzyEpisodes(episodes, titles));
   }
 
   return {

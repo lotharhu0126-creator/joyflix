@@ -3,7 +3,7 @@ import { isIP } from "node:net";
 
 import { NextRequest, NextResponse } from "next/server";
 
-import { hasUsableBdzyPlayback } from "@/lib/bdzy-playback";
+import { getUsableBdzyEpisodes } from "@/lib/bdzy-playback";
 import { API_CONFIG, ApiSite, getAvailableApiSites } from "@/lib/config";
 import { SearchResult } from "@/lib/types";
 
@@ -13,16 +13,13 @@ const BDZY_SOURCE_KEY = "bdzy";
 const BDZY_TYPE_ID = 14;
 // Các nguồn VOD không ổn định; không để vài nguồn chậm giữ skeleton trên
 // trang chủ quá lâu. Nguồn quá hạn sẽ được bỏ qua trong lần quét đó.
-const REQUEST_TIMEOUT_MS = 4_000;
+const REQUEST_TIMEOUT_MS = 2_500;
 const FETCH_CONCURRENCY = 12;
-// Một hàng chỉ có 20 thẻ; xác minh chúng song song giúp không cộng dồn thời
-// gian chờ của từng CDN, trong khi vẫn không tải hay proxy toàn bộ video.
-const PLAYBACK_CONCURRENCY = 20;
 const PLAYBACK_CACHE_TTL_MS = 10 * 60 * 1000;
 const MAX_MANIFEST_BYTES = 256 * 1024;
 const MAX_SEGMENT_PROBE_BYTES = 4 * 1024;
 const BDZY_PREVIEW_PAGE_COUNT = 5;
-const BDZY_LEGACY_PLAYABLE_PAGE_COUNT = 14;
+const BDZY_LEGACY_PLAYABLE_PAGE_COUNT = 11;
 const CATALOG_CACHE_TTL_MS = 5 * 60 * 1000;
 // Trang chủ chỉ cần một hàng phim. Giữ giới hạn này bằng đúng số thẻ hiển thị
 // để khách đầu tiên không phải chờ kiểm tra thêm các stream chưa cần đến.
@@ -32,16 +29,10 @@ const CATALOG_SIZE = 20;
 // khách mở trang chủ.
 const WESTERN_SOURCE_TYPE_IDS: Readonly<Record<string, readonly number[]>> = {
   dyttzy: [16],
-  gszy: [14],
   ruyi: [16],
   bfzy: [32],
   tyyszy: [14],
-  zy360: [16],
   jisu: [3],
-  ikun: [26],
-  maoyan: [16],
-  jy: [3],
-  sn: [14],
   [BDZY_SOURCE_KEY]: [BDZY_TYPE_ID],
 };
 
@@ -211,10 +202,11 @@ function toCandidate(
     return null;
   }
 
-  const { episodes, titles } = getEpisodes(video.vod_play_url);
+  let { episodes, titles } = getEpisodes(video.vod_play_url);
   if (episodes.length === 0) return null;
-  if (site.key === BDZY_SOURCE_KEY && !hasUsableBdzyPlayback(episodes)) {
-    return null;
+  if (site.key === BDZY_SOURCE_KEY) {
+    ({ episodes, titles } = getUsableBdzyEpisodes(episodes, titles));
+    if (episodes.length === 0) return null;
   }
 
   return {
@@ -352,6 +344,9 @@ async function fetchPlaybackResource(
       redirect: "error",
       cache: "no-store",
       headers: {
+        // hls.js gửi Origin khi tải cross-origin. Một số CDN chỉ trả CORS
+        // đúng cho request có Origin, nên phải kiểm tra cùng điều kiện này.
+        Origin: siteOrigin,
         Accept: probeSegment ? "*/*" : "application/vnd.apple.mpegurl, */*",
         ...(probeSegment ? { Range: "bytes=0-4095" } : {}),
       },
@@ -491,27 +486,40 @@ async function getVerifiedCandidates(
   limit: number,
   siteOrigin: string
 ) {
+  // Netlify giới hạn thời gian function khá ngắn. Kiểm tra một stream đại
+  // diện cho từng nguồn/CDN rồi mới nhận các thẻ còn lại của nguồn đó: vẫn
+  // chặn nguồn đang chết/JPEG, nhưng không nhân thời gian chờ lên 20 lần.
+  const samplesBySource = new Map<string, Candidate>();
+  for (const candidate of candidates) {
+    if (!samplesBySource.has(candidate.source)) {
+      samplesBySource.set(candidate.source, candidate);
+    }
+  }
+  const sourceSamples = Array.from(samplesBySource.entries());
+  const sourceResults = await Promise.all(
+    sourceSamples.map(async ([source, candidate]) => [
+      source,
+      await isHlsPlayable(candidate.episodes[0], siteOrigin),
+    ])
+  );
+  const healthySources = new Set(
+    sourceResults
+      .filter(([, isPlayable]) => isPlayable)
+      .map(([source]) => source)
+  );
+
   const selected: SearchResult[] = [];
   const usedTitles = new Set<string>();
 
-  for (
-    let start = 0;
-    start < candidates.length && selected.length < limit;
-    start += PLAYBACK_CONCURRENCY
-  ) {
-    const batch = candidates.slice(start, start + PLAYBACK_CONCURRENCY);
-    const playbackResults = await Promise.all(
-      batch.map((candidate) => isHlsPlayable(candidate.episodes[0], siteOrigin))
-    );
-
-    batch.forEach((candidate, index) => {
-      if (!playbackResults[index] || selected.length >= limit) return;
-      const titleKey = normalizeTitle(candidate.title);
-      if (!titleKey || usedTitles.has(titleKey)) return;
-      usedTitles.add(titleKey);
-      const { sourceOrder: _sourceOrder, ...item } = candidate;
-      selected.push(item);
-    });
+  for (const candidate of candidates) {
+    if (!healthySources.has(candidate.source) || selected.length >= limit) {
+      continue;
+    }
+    const titleKey = normalizeTitle(candidate.title);
+    if (!titleKey || usedTitles.has(titleKey)) continue;
+    usedTitles.add(titleKey);
+    const { sourceOrder: _sourceOrder, ...item } = candidate;
+    selected.push(item);
   }
 
   return selected;

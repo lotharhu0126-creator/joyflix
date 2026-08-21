@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { BDZY_ADULT_TYPE_ID } from '@/lib/adult-content';
 import { hasValidAccountSession } from '@/lib/auth';
-import { hasUsableBdzyPlayback } from '@/lib/bdzy-playback';
+import { getUsableBdzyEpisodes } from '@/lib/bdzy-playback';
 import {
   HONG_KONG_CATEGORY_ID,
   HONG_KONG_LANGUAGES,
@@ -270,8 +270,9 @@ export async function GET(request: NextRequest) {
     }
 
     const items: SearchResult[] = data.list.flatMap((item: BdzyVideo) => {
-      const { episodes, titles } = getEpisodes(item.vod_play_url);
-      if (!hasUsableBdzyPlayback(episodes)) return [];
+      let { episodes, titles } = getEpisodes(item.vod_play_url);
+      ({ episodes, titles } = getUsableBdzyEpisodes(episodes, titles));
+      if (episodes.length === 0) return [];
 
       return [{
         id: String(item.vod_id),
