@@ -1,32 +1,22 @@
-import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
+import { NextRequest, NextResponse } from 'next/server';
 
-import { NextRequest, NextResponse } from "next/server";
+import { getUsableBdzyEpisodes } from '@/lib/bdzy-playback';
+import { API_CONFIG, ApiSite, getAvailableApiSites } from '@/lib/config';
+import { SearchResult } from '@/lib/types';
 
-import { getUsableBdzyEpisodes } from "@/lib/bdzy-playback";
-import { API_CONFIG, ApiSite, getAvailableApiSites } from "@/lib/config";
-import { SearchResult } from "@/lib/types";
+export const runtime = 'nodejs';
 
-export const runtime = "nodejs";
-
-const BDZY_SOURCE_KEY = "bdzy";
+const BDZY_SOURCE_KEY = 'bdzy';
 const BDZY_TYPE_ID = 14;
-// Các nguồn VOD không ổn định; không để vài nguồn chậm giữ skeleton trên
-// trang chủ quá lâu. Nguồn quá hạn sẽ được bỏ qua trong lần quét đó.
-const REQUEST_TIMEOUT_MS = 2_500;
+const REQUEST_TIMEOUT_MS = 2500;
 const FETCH_CONCURRENCY = 12;
-const PLAYBACK_CACHE_TTL_MS = 10 * 60 * 1000;
-const MAX_MANIFEST_BYTES = 256 * 1024;
-const MAX_SEGMENT_PROBE_BYTES = 4 * 1024;
+const BDZY_LEGACY_START_PAGE = 22;
 const BDZY_PREVIEW_PAGE_COUNT = 5;
-const BDZY_LEGACY_PLAYABLE_PAGE_COUNT = 11;
 const CATALOG_CACHE_TTL_MS = 5 * 60 * 1000;
-// Trang chủ chỉ cần một hàng phim. Giữ giới hạn này bằng đúng số thẻ hiển thị
-// để khách đầu tiên không phải chờ kiểm tra thêm các stream chưa cần đến.
 const CATALOG_SIZE = 20;
-// Mỗi API tự đặt mã thể loại riêng. Chỉ dùng các nguồn JoyFlix đã xác nhận
-// có đúng danh mục 欧美剧, thay vì quét cả nguồn không phản hồi/rỗng ở mỗi lần
-// khách mở trang chủ.
+
+// Mỗi API tự đặt mã thể loại riêng. Đây là các nguồn JoyFlix có danh mục
+// 欧美剧; BDZY là nguồn bổ sung, được ghép lẫn thay vì thay thế nguồn gốc.
 const WESTERN_SOURCE_TYPE_IDS: Readonly<Record<string, readonly number[]>> = {
   dyttzy: [16],
   ruyi: [16],
@@ -51,16 +41,11 @@ interface UpstreamVideo {
 
 interface UpstreamPage {
   list?: UpstreamVideo[];
-  pagecount?: number | string;
 }
 
 interface WesternTarget {
   site: ApiSite;
   typeId: number;
-}
-
-interface Candidate extends SearchResult {
-  sourceOrder: number;
 }
 
 interface CacheEntry<T> {
@@ -73,7 +58,6 @@ interface WesternCatalog {
   sourceCount: number;
 }
 
-const playableUrlCache = new Map<string, CacheEntry<boolean>>();
 const westernCatalogCache = new Map<string, CacheEntry<WesternCatalog>>();
 const westernCatalogPromises = new Map<string, Promise<WesternCatalog>>();
 
@@ -81,14 +65,14 @@ function getEpisodes(playUrl?: string) {
   let episodes: string[] = [];
   let titles: string[] = [];
 
-  for (const sourceLine of playUrl?.split("$$$") || []) {
+  for (const sourceLine of playUrl?.split('$$$') || []) {
     const candidateEpisodes: string[] = [];
     const candidateTitles: string[] = [];
 
-    for (const episode of sourceLine.split("#")) {
-      const [title, url, ...rest] = episode.split("$");
-      const pathname = url?.split("?")[0]?.toLowerCase();
-      if (title && url && rest.length === 0 && pathname?.endsWith(".m3u8")) {
+    for (const episode of sourceLine.split('#')) {
+      const [title, url, ...rest] = episode.split('$');
+      const pathname = url?.split('?')[0]?.toLowerCase();
+      if (title && url && rest.length === 0 && pathname?.endsWith('.m3u8')) {
         candidateTitles.push(title);
         candidateEpisodes.push(url);
       }
@@ -105,10 +89,18 @@ function getEpisodes(playUrl?: string) {
 
 function normalizeTitle(title: string) {
   return title
-    .normalize("NFKC")
+    .normalize('NFKC')
     .toLowerCase()
-    .replace(/(?:粤语|国语|汉语普通话|普通话)(?:版)?/g, "")
-    .replace(/[\s·・:：,，.。'"“”‘’()（）\[\]【】{}<>《》_\-—–]/g, "");
+    .replace(/(?:粤语|国语|汉语普通话|普通话)(?:版)?/g, '')
+    .replace(/[\s·・:：,，.。'"“”‘’()（）\[\]【】{}<>《》_\-—–]/g, '');
+}
+
+function isLikelyAdult(video: UpstreamVideo) {
+  return /(?:伦理|情色|色情|成人|午夜|18[+＋])/.test(
+    [video.vod_name, video.vod_class, video.type_name]
+      .filter(Boolean)
+      .join(' ')
+  );
 }
 
 function getBdzyRelayUrl(upstreamUrl: URL): URL | null {
@@ -117,7 +109,7 @@ function getBdzyRelayUrl(upstreamUrl: URL): URL | null {
 
   try {
     const relayUrl = new URL(configuredUrl);
-    if (relayUrl.protocol !== "https:") return null;
+    if (relayUrl.protocol !== 'https:') return null;
     relayUrl.search = upstreamUrl.search;
     return relayUrl;
   } catch {
@@ -133,7 +125,7 @@ async function fetchJson(url: URL): Promise<unknown | null> {
     const response = await fetch(url, {
       signal: controller.signal,
       headers: API_CONFIG.search.headers,
-      cache: "no-store",
+      cache: 'no-store',
     });
     if (!response.ok) return null;
     return await response.json();
@@ -180,9 +172,9 @@ async function fetchSourcePage(
   page: number
 ): Promise<UpstreamPage | null> {
   const upstreamUrl = new URL(target.site.api);
-  upstreamUrl.searchParams.set("ac", "videolist");
-  upstreamUrl.searchParams.set("t", String(target.typeId));
-  upstreamUrl.searchParams.set("pg", String(page));
+  upstreamUrl.searchParams.set('ac', 'videolist');
+  upstreamUrl.searchParams.set('t', String(target.typeId));
+  upstreamUrl.searchParams.set('pg', String(page));
   const requestUrl =
     target.site.key === BDZY_SOURCE_KEY
       ? getBdzyRelayUrl(upstreamUrl) || upstreamUrl
@@ -192,262 +184,48 @@ async function fetchSourcePage(
   return Array.isArray(data?.list) ? data : null;
 }
 
-function toCandidate(
-  site: ApiSite,
-  video: UpstreamVideo,
-  sourceOrder: number
-): Candidate | null {
-  const title = video.vod_name?.trim().replace(/\s+/g, " ");
-  if (!title || video.vod_id === undefined || video.vod_id === null) {
+function toCandidate(site: ApiSite, video: UpstreamVideo): SearchResult | null {
+  const title = video.vod_name?.trim().replace(/\s+/g, ' ');
+  if (
+    !title ||
+    video.vod_id === undefined ||
+    video.vod_id === null ||
+    isLikelyAdult(video)
+  ) {
     return null;
   }
 
   let { episodes, titles } = getEpisodes(video.vod_play_url);
-  if (episodes.length === 0) return null;
   if (site.key === BDZY_SOURCE_KEY) {
     ({ episodes, titles } = getUsableBdzyEpisodes(episodes, titles));
-    if (episodes.length === 0) return null;
   }
+  if (episodes.length === 0) return null;
 
   return {
     id: String(video.vod_id),
     title,
-    poster: video.vod_pic || "",
+    poster: video.vod_pic || '',
     episodes,
     episodes_titles: titles,
     source: site.key,
     source_name: site.name,
     class: video.vod_class,
-    year: video.vod_year?.match(/\d{4}/)?.[0] || "unknown",
-    desc: video.vod_content || "",
+    year: video.vod_year?.match(/\d{4}/)?.[0] || 'unknown',
+    desc: video.vod_content || '',
     type_name: video.type_name,
     type_id: video.type_id,
     country: video.vod_area,
-    sourceOrder,
   };
 }
 
-function isPrivateIpv4(address: string) {
-  const parts = address.split(".").map(Number);
-  const [first, second] = parts;
-  return (
-    first === 0 ||
-    first === 10 ||
-    first === 127 ||
-    first >= 224 ||
-    (first === 100 && second >= 64 && second <= 127) ||
-    (first === 169 && second === 254) ||
-    (first === 172 && second >= 16 && second <= 31) ||
-    (first === 192 && second === 168)
-  );
-}
-
-function isPublicIp(address: string) {
-  const version = isIP(address);
-  if (version === 4) return !isPrivateIpv4(address);
-  if (version !== 6) return false;
-
-  const value = address.toLowerCase();
-  return !(
-    value === "::1" ||
-    value === "::" ||
-    value.startsWith("fc") ||
-    value.startsWith("fd") ||
-    value.startsWith("fe80:") ||
-    value.startsWith("::ffff:127.") ||
-    value.startsWith("::ffff:10.") ||
-    value.startsWith("::ffff:192.168.") ||
-    value.startsWith("::ffff:169.254.")
-  );
-}
-
-async function isSafePlaybackUrl(rawUrl: string) {
-  try {
-    const url = new URL(rawUrl);
-    if (
-      url.protocol !== "https:" ||
-      Boolean(url.username) ||
-      Boolean(url.password) ||
-      url.hostname === "localhost" ||
-      url.hostname.endsWith(".local")
-    ) {
-      return false;
-    }
-
-    if (isIP(url.hostname)) return isPublicIp(url.hostname);
-    const addresses = await lookup(url.hostname, { all: true, verbatim: true });
-    return (
-      addresses.length > 0 &&
-      addresses.every(({ address }) => isPublicIp(address))
-    );
-  } catch {
-    return false;
-  }
-}
-
-function isCorsAllowed(response: Response, siteOrigin: string) {
-  const allowedOrigins = response.headers.get("access-control-allow-origin");
-  if (!allowedOrigins) return false;
-  return allowedOrigins
-    .split(",")
-    .map((origin) => origin.trim())
-    .some((origin) => origin === "*" || origin === siteOrigin);
-}
-
-async function readResponseAtMost(response: Response, maximumBytes: number) {
-  const contentLength = Number(response.headers.get("content-length"));
-  if (Number.isFinite(contentLength) && contentLength > maximumBytes) {
-    throw new Error("Response too large");
-  }
-
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error("Missing response body");
-
-  const chunks: Uint8Array[] = [];
-  let totalBytes = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      totalBytes += value.byteLength;
-      if (totalBytes > maximumBytes) {
-        await reader.cancel();
-        throw new Error("Response too large");
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  const output = new Uint8Array(totalBytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    output.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return output;
-}
-
-async function fetchPlaybackResource(
-  url: string,
-  siteOrigin: string,
-  probeSegment = false
-) {
-  if (!(await isSafePlaybackUrl(url))) return null;
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, {
-      signal: controller.signal,
-      redirect: "error",
-      cache: "no-store",
-      headers: {
-        // hls.js gửi Origin khi tải cross-origin. Một số CDN chỉ trả CORS
-        // đúng cho request có Origin, nên phải kiểm tra cùng điều kiện này.
-        Origin: siteOrigin,
-        Accept: probeSegment ? "*/*" : "application/vnd.apple.mpegurl, */*",
-        ...(probeSegment ? { Range: "bytes=0-4095" } : {}),
-      },
-    });
-    if (!response.ok || !isCorsAllowed(response, siteOrigin)) return null;
-    return response;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-function findFirstMediaUri(manifest: string) {
-  return manifest
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find((line) => line && !line.startsWith("#"));
-}
-
-function isJpeg(bytes: Uint8Array) {
-  return (
-    bytes.length >= 3 &&
-    bytes[0] === 0xff &&
-    bytes[1] === 0xd8 &&
-    bytes[2] === 0xff
-  );
-}
-
-function isMpegTs(bytes: Uint8Array) {
-  return bytes[0] === 0x47 || (bytes.length > 188 && bytes[188] === 0x47);
-}
-
-function isFragmentedMp4(bytes: Uint8Array) {
-  return new TextDecoder().decode(bytes.slice(4, 8)) === "ftyp";
-}
-
-async function isHlsPlayable(playlistUrl: string, siteOrigin: string) {
-  const cached = playableUrlCache.get(playlistUrl);
-  if (cached && cached.expiresAt > Date.now()) return cached.value;
-
-  let value = false;
-  let currentUrl = playlistUrl;
-  try {
-    for (let depth = 0; depth < 3; depth += 1) {
-      const response = await fetchPlaybackResource(currentUrl, siteOrigin);
-      if (!response) break;
-
-      const manifestBytes = await readResponseAtMost(
-        response,
-        MAX_MANIFEST_BYTES
-      );
-      const manifest = new TextDecoder().decode(manifestBytes);
-      if (!manifest.startsWith("#EXTM3U")) break;
-
-      const mediaUri = findFirstMediaUri(manifest);
-      if (!mediaUri) break;
-      const mediaUrl = new URL(mediaUri, currentUrl).toString();
-      if (mediaUrl.split("?")[0].toLowerCase().endsWith(".m3u8")) {
-        currentUrl = mediaUrl;
-        continue;
-      }
-
-      const segment = await fetchPlaybackResource(mediaUrl, siteOrigin, true);
-      if (!segment) break;
-      const contentType =
-        segment.headers.get("content-type")?.toLowerCase() || "";
-      if (
-        contentType.startsWith("image/") ||
-        contentType.includes("text/html")
-      ) {
-        break;
-      }
-      const bytes = await readResponseAtMost(segment, MAX_SEGMENT_PROBE_BYTES);
-      value =
-        !isJpeg(bytes) &&
-        (contentType.startsWith("video/") ||
-          contentType.startsWith("audio/") ||
-          isMpegTs(bytes) ||
-          isFragmentedMp4(bytes));
-      break;
-    }
-  } catch {
-    value = false;
-  }
-
-  playableUrlCache.set(playlistUrl, {
-    value,
-    expiresAt: Date.now() + PLAYBACK_CACHE_TTL_MS,
-  });
-  return value;
-}
-
 function interleaveCandidates(
-  regularGroups: Candidate[][],
-  bdzyCandidates: Candidate[],
+  regularGroups: SearchResult[][],
+  bdzyCandidates: SearchResult[],
   maximumCandidates: number
 ) {
   const regularQueues = regularGroups.map((items) => [...items]);
   const bdzyQueue = [...bdzyCandidates];
-  const candidates: Candidate[] = [];
+  const candidates: SearchResult[] = [];
 
   while (candidates.length < maximumCandidates) {
     let added = false;
@@ -457,8 +235,6 @@ function interleaveCandidates(
         candidates.push(candidate);
         added = true;
       }
-      // BDZY là nguồn bổ sung: xen sau mỗi bốn nguồn JoyFlix để cả hai
-      // cùng xuất hiện trong hàng đầu mà không ưu tiên một bên tuyệt đối.
       if (index % 4 === 3) {
         const bdzyCandidate = bdzyQueue.shift();
         if (bdzyCandidate) {
@@ -481,85 +257,42 @@ function interleaveCandidates(
   return candidates;
 }
 
-async function getVerifiedCandidates(
-  candidates: Candidate[],
-  limit: number,
-  siteOrigin: string
-) {
-  // Netlify giới hạn thời gian function khá ngắn. Kiểm tra một stream đại
-  // diện cho từng nguồn/CDN rồi mới nhận các thẻ còn lại của nguồn đó: vẫn
-  // chặn nguồn đang chết/JPEG, nhưng không nhân thời gian chờ lên 20 lần.
-  const samplesBySource = new Map<string, Candidate>();
-  for (const candidate of candidates) {
-    if (!samplesBySource.has(candidate.source)) {
-      samplesBySource.set(candidate.source, candidate);
-    }
-  }
-  const sourceSamples = Array.from(samplesBySource.entries());
-  const sourceResults = await Promise.all(
-    sourceSamples.map(async ([source, candidate]) => [
-      source,
-      await isHlsPlayable(candidate.episodes[0], siteOrigin),
-    ])
-  );
-  const healthySources = new Set(
-    sourceResults
-      .filter(([, isPlayable]) => isPlayable)
-      .map(([source]) => source)
-  );
-
+function selectDistinctCandidates(candidates: SearchResult[], limit: number) {
   const selected: SearchResult[] = [];
   const usedTitles = new Set<string>();
 
   for (const candidate of candidates) {
-    if (!healthySources.has(candidate.source) || selected.length >= limit) {
-      continue;
-    }
+    if (selected.length >= limit) break;
     const titleKey = normalizeTitle(candidate.title);
     if (!titleKey || usedTitles.has(titleKey)) continue;
     usedTitles.add(titleKey);
-    const { sourceOrder: _sourceOrder, ...item } = candidate;
-    selected.push(item);
+    selected.push(candidate);
   }
 
   return selected;
 }
 
-async function getBdzyCandidates(target: WesternTarget, sourceOrder: number) {
-  const firstPage = await fetchSourcePage(target, 1);
-  const pageCount = Math.max(1, Number(firstPage?.pagecount) || 1);
-  const firstCandidates = (firstPage?.list || [])
-    .map((video) => toCandidate(target.site, video, sourceOrder))
-    .filter((candidate): candidate is Candidate => Boolean(candidate));
-
-  // BDZY hiện xếp nhóm JPEG lỗi ở đầu kho; phần HLS hợp lệ bắt đầu ở các
-  // trang cũ hơn. Nếu trang 1 không có HLS, chỉ quét một cửa sổ nhỏ ở phần
-  // cuối kho để lấy thẻ bổ sung cho trang chủ, không quét cả 629 mục.
-  const startPage =
-    firstCandidates.length > 0
-      ? 2
-      : Math.max(2, pageCount - BDZY_LEGACY_PLAYABLE_PAGE_COUNT + 1);
-  const endPage = Math.min(pageCount, startPage + BDZY_PREVIEW_PAGE_COUNT - 1);
+async function getBdzyCandidates(target: WesternTarget) {
+  // Trang mới của BDZY hiện chủ yếu là playlist JPEG không phát được. Vùng
+  // HLS đã xác nhận nằm từ trang 22; gọi đồng thời năm trang này để server
+  // không phải chờ tuần tự và không chạm giới hạn thời gian của Netlify.
   const pageNumbers = Array.from(
-    { length: Math.max(0, endPage - startPage + 1) },
-    (_, index) => startPage + index
+    { length: BDZY_PREVIEW_PAGE_COUNT },
+    (_, index) => BDZY_LEGACY_START_PAGE + index
   );
-  const remainingPages = await mapWithConcurrency(
+  const pages = await mapWithConcurrency(
     pageNumbers,
     (page) => fetchSourcePage(target, page),
     FETCH_CONCURRENCY
   );
 
-  const remainingCandidates = remainingPages
+  return pages
     .flatMap((page) => page?.list || [])
-    .map((video) => toCandidate(target.site, video, sourceOrder))
-    .filter((candidate): candidate is Candidate => Boolean(candidate));
-  return [...firstCandidates, ...remainingCandidates];
+    .map((video) => toCandidate(target.site, video))
+    .filter((candidate): candidate is SearchResult => Boolean(candidate));
 }
 
-async function buildWesternCatalog(
-  siteOrigin: string
-): Promise<WesternCatalog> {
+async function buildWesternCatalog(): Promise<WesternCatalog> {
   const sites = await getAvailableApiSites();
   const targets = getWesternTargets(sites);
   const regularTargets = targets.filter(
@@ -575,35 +308,20 @@ async function buildWesternCatalog(
       (target) => fetchSourcePage(target, 1),
       FETCH_CONCURRENCY
     ),
-    bdzyTarget
-      ? getBdzyCandidates(
-          bdzyTarget,
-          sites.findIndex((site) => site.key === BDZY_SOURCE_KEY)
-        )
-      : Promise.resolve([]),
+    bdzyTarget ? getBdzyCandidates(bdzyTarget) : Promise.resolve([]),
   ]);
   const regularGroups = regularPages.map((page, index) =>
     (page?.list || [])
-      .map((video) =>
-        toCandidate(
-          regularTargets[index].site,
-          video,
-          sites.findIndex((site) => site.key === regularTargets[index].site.key)
-        )
-      )
-      .filter((candidate): candidate is Candidate => Boolean(candidate))
+      .map((video) => toCandidate(regularTargets[index].site, video))
+      .filter((candidate): candidate is SearchResult => Boolean(candidate))
   );
 
   const candidates = interleaveCandidates(
     regularGroups,
     bdzyCandidates,
-    Math.max(CATALOG_SIZE * 12, 120)
+    CATALOG_SIZE * 2
   );
-  const items = await getVerifiedCandidates(
-    candidates,
-    CATALOG_SIZE,
-    siteOrigin
-  );
+  const items = selectDistinctCandidates(candidates, CATALOG_SIZE);
 
   return {
     items,
@@ -613,13 +331,14 @@ async function buildWesternCatalog(
 
 function getWesternCatalog(siteOrigin: string) {
   const cached = westernCatalogCache.get(siteOrigin);
-  if (cached && cached.expiresAt > Date.now())
+  if (cached && cached.expiresAt > Date.now()) {
     return Promise.resolve(cached.value);
+  }
 
   const pending = westernCatalogPromises.get(siteOrigin);
   if (pending) return pending;
 
-  const request = buildWesternCatalog(siteOrigin)
+  const request = buildWesternCatalog()
     .then((catalog) => {
       westernCatalogCache.set(siteOrigin, {
         value: catalog,
@@ -635,10 +354,10 @@ function getWesternCatalog(siteOrigin: string) {
 }
 
 export async function GET(request: NextRequest) {
-  const limit = Number(request.nextUrl.searchParams.get("limit") || "20");
+  const limit = Number(request.nextUrl.searchParams.get('limit') || '20');
   if (!Number.isInteger(limit) || limit < 1 || limit > CATALOG_SIZE) {
     return NextResponse.json(
-      { error: "Giới hạn không hợp lệ" },
+      { error: 'Giới hạn không hợp lệ' },
       { status: 400 }
     );
   }
@@ -652,17 +371,15 @@ export async function GET(request: NextRequest) {
         checkedAt: Date.now(),
       },
       {
-        // Danh mục này không có nội dung 18+; cache ngắn để khách sau không
-        // phải kiểm tra lại cùng manifest/segment ngay lập tức.
         headers: {
-          "Cache-Control": "public, max-age=300, s-maxage=600",
-          "Netlify-Vary": "query",
+          'Cache-Control': 'public, max-age=300, s-maxage=600',
+          'Netlify-Vary': 'query',
         },
       }
     );
   } catch {
     return NextResponse.json(
-      { error: "Không thể tổng hợp phim Âu Mỹ lúc này" },
+      { error: 'Không thể tổng hợp phim Âu Mỹ lúc này' },
       { status: 502 }
     );
   }
