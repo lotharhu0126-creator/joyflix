@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { hasValidAccountSession } from '@/lib/auth';
+import { hasUsableBdzyPlayback } from '@/lib/bdzy-playback';
 import { API_CONFIG, ApiSite, getAvailableApiSites } from '@/lib/config';
 import { SearchResult } from '@/lib/types';
 
@@ -118,6 +119,7 @@ function toSearchResult(
 
   const { episodes, titles } = getEpisodes(video.vod_play_url);
   if (episodes.length === 0) return null;
+  if (site.key === 'bdzy' && !hasUsableBdzyPlayback(episodes)) return null;
 
   return {
     id: String(video.vod_id),

@@ -1,4 +1,5 @@
 import { API_CONFIG, ApiSite, getConfig } from '@/lib/config';
+import { hasUsableBdzyPlayback } from '@/lib/bdzy-playback';
 import { SearchResult } from '@/lib/types';
 import { cleanHtmlTags } from '@/lib/utils';
 
@@ -208,7 +209,10 @@ export async function searchFromApi(
       });
     }
 
-    return results;
+    return results.filter(
+      (result: SearchResult) =>
+        result.source !== 'bdzy' || hasUsableBdzyPlayback(result.episodes)
+    );
   } catch (error) {
     return [];
   }

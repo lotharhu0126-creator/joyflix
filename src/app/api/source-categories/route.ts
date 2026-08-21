@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { BDZY_ADULT_TYPE_ID } from '@/lib/adult-content';
 import { hasValidAccountSession } from '@/lib/auth';
+import { hasUsableBdzyPlayback } from '@/lib/bdzy-playback';
 import {
   HONG_KONG_CATEGORY_ID,
   HONG_KONG_LANGUAGES,
@@ -268,9 +269,11 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const items: SearchResult[] = data.list.map((item: BdzyVideo) => {
+    const items: SearchResult[] = data.list.flatMap((item: BdzyVideo) => {
       const { episodes, titles } = getEpisodes(item.vod_play_url);
-      return {
+      if (!hasUsableBdzyPlayback(episodes)) return [];
+
+      return [{
         id: String(item.vod_id),
         title: item.vod_name?.trim() || 'Không có tiêu đề',
         poster: item.vod_pic || '',
@@ -283,7 +286,7 @@ export async function GET(request: NextRequest) {
         desc: item.vod_content,
         type_name: item.type_name,
         type_id: item.type_id || typeId,
-      };
+      }];
     });
 
     return NextResponse.json(

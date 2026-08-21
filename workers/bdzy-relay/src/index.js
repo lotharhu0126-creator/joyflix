@@ -1,4 +1,6 @@
 const BDZY_API_URL = 'https://api.apibdzy.com/api.php/provide/vod/at/json';
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const UPSTREAM_TIMEOUT_MS = 10_000;
 
 function jsonResponse(body, status) {
   return new Response(JSON.stringify(body), {
@@ -19,6 +21,39 @@ function parsePositiveInteger(value, maximum) {
     : null;
 }
 
+async function readJsonBody(response) {
+  const contentLength = Number(response.headers.get('Content-Length'));
+  if (Number.isFinite(contentLength) && contentLength > MAX_RESPONSE_BYTES) {
+    throw new Error('BDZY response exceeds size limit');
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('BDZY response body is missing');
+
+  const decoder = new TextDecoder();
+  let totalBytes = 0;
+  let body = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw new Error('BDZY response exceeds size limit');
+      }
+      body += decoder.decode(value, { stream: true });
+    }
+    body += decoder.decode();
+  } finally {
+    reader.releaseLock();
+  }
+
+  return { body, data: JSON.parse(body) };
+}
+
 export default {
   async fetch(request) {
     const requestUrl = new URL(request.url);
@@ -33,39 +68,65 @@ export default {
       return jsonResponse({ error: 'Invalid BDZY action' }, 400);
     }
 
-    // `t` chỉ cần khi duyệt một thể loại BDZY cụ thể. Tìm kiếm theo `wd`
-    // (ví dụ "粤语") phải được phép đi qua toàn bộ danh mục nguồn này.
-    const requestedTypeId = requestUrl.searchParams.get('t');
-    const typeId = requestedTypeId
-      ? parsePositiveInteger(requestedTypeId, 999)
-      : null;
-    const page = parsePositiveInteger(requestUrl.searchParams.get('pg') || '1', 1000);
-    const keyword = requestUrl.searchParams.get('wd');
-    if (
-      !page ||
-      (requestedTypeId !== null && !typeId) ||
-      (keyword && keyword.length > 100)
-    ) {
-      return jsonResponse({ error: 'Invalid BDZY query' }, 400);
-    }
-
     // Fixed upstream + whitelist query: worker này không thể dùng để proxy URL
-    // bất kỳ, không proxy video/image và chỉ relay danh sách BDZY cho JoyFlix.
+    // bất kỳ, không proxy video/image và chỉ relay dữ liệu BDZY cho JoyFlix.
     const upstreamUrl = new URL(BDZY_API_URL);
     upstreamUrl.searchParams.set('ac', 'videolist');
-    if (typeId) upstreamUrl.searchParams.set('t', typeId);
-    upstreamUrl.searchParams.set('pg', page);
-    if (keyword) upstreamUrl.searchParams.set('wd', keyword);
+    const requestedId = requestUrl.searchParams.get('ids');
+    const isDetailRequest = requestedId !== null;
+
+    if (isDetailRequest) {
+      const id = parsePositiveInteger(requestedId, 999_999_999);
+      if (
+        !id ||
+        requestUrl.searchParams.has('t') ||
+        requestUrl.searchParams.has('pg') ||
+        requestUrl.searchParams.has('wd')
+      ) {
+        return jsonResponse({ error: 'Invalid BDZY detail query' }, 400);
+      }
+      upstreamUrl.searchParams.set('ids', id);
+    } else {
+      // `t` chỉ cần khi duyệt một thể loại BDZY cụ thể. Tìm kiếm theo `wd`
+      // (ví dụ "粤语") phải được phép đi qua toàn bộ danh mục nguồn này.
+      const requestedTypeId = requestUrl.searchParams.get('t');
+      const typeId = requestedTypeId
+        ? parsePositiveInteger(requestedTypeId, 999)
+        : null;
+      const page = parsePositiveInteger(
+        requestUrl.searchParams.get('pg') || '1',
+        1000
+      );
+      const keyword = requestUrl.searchParams.get('wd');
+      if (
+        !page ||
+        (requestedTypeId !== null && !typeId) ||
+        (keyword && keyword.length > 100)
+      ) {
+        return jsonResponse({ error: 'Invalid BDZY query' }, 400);
+      }
+      if (typeId) upstreamUrl.searchParams.set('t', typeId);
+      upstreamUrl.searchParams.set('pg', page);
+      if (keyword) upstreamUrl.searchParams.set('wd', keyword);
+    }
 
     try {
-      const upstreamResponse = await fetch(upstreamUrl, {
-        headers: {
-          Accept: 'application/json, text/plain, */*',
-          'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-          'User-Agent':
-            'Mozilla/5.0 (compatible; JoyFlix-BDZY-Relay/1.0; +https://xemfree.netlify.app)',
-        },
-      });
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+      let upstreamResponse;
+      try {
+        upstreamResponse = await fetch(upstreamUrl, {
+          signal: controller.signal,
+          headers: {
+            Accept: 'application/json, text/plain, */*',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'User-Agent':
+              'Mozilla/5.0 (compatible; JoyFlix-BDZY-Relay/1.0; +https://xemfree.netlify.app)',
+          },
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
 
       if (!upstreamResponse.ok) {
         console.warn('BDZY rejected relay request', {
@@ -78,8 +139,7 @@ export default {
         );
       }
 
-      const body = await upstreamResponse.text();
-      const data = JSON.parse(body);
+      const { body, data } = await readJsonBody(upstreamResponse);
       if (!Array.isArray(data?.list)) {
         return jsonResponse({ error: 'Invalid BDZY response' }, 502);
       }
@@ -87,7 +147,9 @@ export default {
       return new Response(body, {
         headers: {
           'Content-Type': 'application/json; charset=utf-8',
-          'Cache-Control': 'public, max-age=300, s-maxage=300',
+          'Cache-Control': isDetailRequest
+            ? 'no-store'
+            : 'public, max-age=300, s-maxage=300',
           'X-Content-Type-Options': 'nosniff',
         },
       });

@@ -334,6 +334,10 @@ function HomeClient() {
     localStorage.setItem('hasSeenAnnouncement', announcement); // 记录已查看弹窗
   };
 
+  const hasBdzyItems = Object.values(bdzyRows).some(
+    (items) => items.length > 0
+  );
+
   return (
     <PageLayout>
       <div className="px-2 sm:px-10 py-4 sm:py-8 overflow-x-hidden">
@@ -512,82 +516,85 @@ function HomeClient() {
                 </ScrollableRow>
               </section>
 
-              {/* Khám phá: các nhóm BDZY được đặt trong theme trang chủ. */}
-              <section className="mb-8">
-                <div className="mb-4 flex items-center justify-between">
-                  <h2
-                    onClick={() => {
-                      window.dispatchEvent(
-                        new CustomEvent('clearHomepageScroll')
-                      );
-                      router.push('/source');
-                    }}
-                    className="flex cursor-pointer items-center text-xl font-bold text-gray-800 transition-transform duration-200 hover:scale-[1.02] hover:text-gray-900 dark:text-gray-200 dark:hover:text-white"
-                  >
-                    Khám phá thêm
-                    <ChevronRight className="ml-1 h-5 w-5" />
-                  </h2>
-                  <button
-                    type="button"
-                    onClick={() => router.push('/source')}
-                    className="text-sm font-medium text-blue-500 hover:text-blue-600 dark:text-blue-300"
-                  >
-                    Xem tất cả
-                  </button>
-                </div>
-                <div className="space-y-8">
-                  {BDZY_FEATURED_CATEGORIES.map((category) => {
-                    const items = bdzyRows[category.id] || [];
-                    return (
-                      <section key={category.id}>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const query = new URLSearchParams({
-                              category: String(category.id),
-                            });
-                            if (category.language) {
-                              query.set('language', category.language);
-                            }
-                            router.push(`/source?${query}`);
-                          }}
-                          className="mb-3 flex items-center text-base font-semibold text-gray-700 hover:text-blue-500 dark:text-gray-300 dark:hover:text-blue-300"
-                        >
-                          {category.name}
-                          <ChevronRight className="ml-1 h-4 w-4" />
-                        </button>
-                        <ScrollableRow>
-                          {isBdzyLoading
-                            ? Array.from({ length: 6 }).map((_, index) => (
-                                <VideoCardSkeleton
-                                  key={index}
-                                  className="min-w-[96px] w-24 sm:min-w-[180px] sm:w-44"
-                                  showYear
-                                />
-                              ))
-                            : items.map((item) => (
-                                <div
-                                  key={`${item.source}-${item.id}`}
-                                  className="min-w-[96px] w-24 sm:min-w-[180px] sm:w-44"
-                                >
-                                  <VideoCard
-                                    id={item.id}
-                                    title={item.title}
-                                    poster={item.poster}
-                                    episodes={item.episodes.length}
-                                    source={item.source}
-                                    source_name={item.source_name}
-                                    year={item.year}
-                                    from="search"
+              {/* Khám phá: chỉ hiện các nhóm BDZY có stream phát được. */}
+              {(isBdzyLoading || hasBdzyItems) && (
+                <section className="mb-8">
+                  <div className="mb-4 flex items-center justify-between">
+                    <h2
+                      onClick={() => {
+                        window.dispatchEvent(
+                          new CustomEvent('clearHomepageScroll')
+                        );
+                        router.push('/source');
+                      }}
+                      className="flex cursor-pointer items-center text-xl font-bold text-gray-800 transition-transform duration-200 hover:scale-[1.02] hover:text-gray-900 dark:text-gray-200 dark:hover:text-white"
+                    >
+                      Khám phá thêm
+                      <ChevronRight className="ml-1 h-5 w-5" />
+                    </h2>
+                    <button
+                      type="button"
+                      onClick={() => router.push('/source')}
+                      className="text-sm font-medium text-blue-500 hover:text-blue-600 dark:text-blue-300"
+                    >
+                      Xem tất cả
+                    </button>
+                  </div>
+                  <div className="space-y-8">
+                    {BDZY_FEATURED_CATEGORIES.map((category) => {
+                      const items = bdzyRows[category.id] || [];
+                      if (!isBdzyLoading && items.length === 0) return null;
+                      return (
+                        <section key={category.id}>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const query = new URLSearchParams({
+                                category: String(category.id),
+                              });
+                              if (category.language) {
+                                query.set('language', category.language);
+                              }
+                              router.push(`/source?${query}`);
+                            }}
+                            className="mb-3 flex items-center text-base font-semibold text-gray-700 hover:text-blue-500 dark:text-gray-300 dark:hover:text-blue-300"
+                          >
+                            {category.name}
+                            <ChevronRight className="ml-1 h-4 w-4" />
+                          </button>
+                          <ScrollableRow>
+                            {isBdzyLoading
+                              ? Array.from({ length: 6 }).map((_, index) => (
+                                  <VideoCardSkeleton
+                                    key={index}
+                                    className="min-w-[96px] w-24 sm:min-w-[180px] sm:w-44"
+                                    showYear
                                   />
-                                </div>
-                              ))}
-                        </ScrollableRow>
-                      </section>
-                    );
-                  })}
-                </div>
-              </section>
+                                ))
+                              : items.map((item) => (
+                                  <div
+                                    key={`${item.source}-${item.id}`}
+                                    className="min-w-[96px] w-24 sm:min-w-[180px] sm:w-44"
+                                  >
+                                    <VideoCard
+                                      id={item.id}
+                                      title={item.title}
+                                      poster={item.poster}
+                                      episodes={item.episodes.length}
+                                      source={item.source}
+                                      source_name={item.source_name}
+                                      year={item.year}
+                                      from="search"
+                                    />
+                                  </div>
+                                ))}
+                          </ScrollableRow>
+                        </section>
+                      );
+                    })}
+                  </div>
+                </section>
+              )}
 
               {/* 热门电影 */}
               <section className="mb-8">

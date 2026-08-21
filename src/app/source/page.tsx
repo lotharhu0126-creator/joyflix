@@ -362,7 +362,8 @@ export default function SourcePage() {
         )}
         {!loading && !error && items.length === 0 && (
           <p className="py-12 text-center text-gray-500">
-            BDZY hiện chưa trả nội dung cho danh mục này.
+            BDZY hiện chưa có nguồn phát tương thích với trình phát cho danh
+            mục này.
           </p>
         )}
         {!loading && !error && items.length > 0 && (
@@ -391,7 +392,7 @@ export default function SourcePage() {
             </div>
           </>
         )}
-        {!loading && !error && pageCount > 1 && (
+        {!loading && !error && items.length > 0 && pageCount > 1 && (
           <nav
             className="mt-8 flex flex-wrap items-center justify-center gap-2"
             aria-label="Phân trang danh mục BDZY"
