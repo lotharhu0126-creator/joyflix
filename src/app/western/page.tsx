@@ -2,7 +2,7 @@
 
 import { ArrowLeft, Home } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 
 import PageLayout from '@/components/PageLayout';
 import { useSite } from '@/components/SiteProvider';
@@ -11,46 +11,72 @@ import VideoCardSkeleton from '@/components/VideoCardSkeleton';
 import { canPlayHlsInBrowser } from '@/lib/hls-playability.client';
 import { SearchResult } from '@/lib/types';
 
-const WESTERN_PAGE_STATE_KEY = 'joyflix-western-page-state';
+const WESTERN_STREAM_STATE_KEY = 'joyflix-western-stream-state';
+const MAX_EMPTY_BATCHES_PER_LOAD = 3;
 
-interface WesternPageState {
-  page: number;
-  pageCount: number;
+interface WesternStreamState {
   items: SearchResult[];
+  nextPage: number;
+  lastLoadedPage: number;
+  pageCount: number;
+  hasMore: boolean;
   scrollTop: number;
 }
 
-function readSavedState() {
+function normalizeTitle(title: string) {
+  return title
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/(?:粤语|国语|汉语普通话|普通话)(?:版)?/g, '')
+    .replace(/[\s·・:：,，.。'"“”‘’()（）\[\]【】{}<>《》_\-—–]/g, '');
+}
+
+function shouldReplaceCandidate(
+  current: SearchResult,
+  candidate: SearchResult
+) {
+  if (candidate.episodes.length !== current.episodes.length) {
+    return candidate.episodes.length > current.episodes.length;
+  }
+  if (Boolean(candidate.poster) !== Boolean(current.poster)) {
+    return Boolean(candidate.poster);
+  }
+  return Boolean(candidate.desc) && !current.desc;
+}
+
+function mergeUniqueItems(
+  currentItems: SearchResult[],
+  newItems: SearchResult[]
+) {
+  const uniqueItems = new Map<string, SearchResult>();
+  for (const item of [...currentItems, ...newItems]) {
+    const key = normalizeTitle(item.title);
+    const current = uniqueItems.get(key);
+    if (!current || shouldReplaceCandidate(current, item)) {
+      uniqueItems.set(key, item);
+    }
+  }
+  return Array.from(uniqueItems.values());
+}
+
+function readSavedState(): WesternStreamState | null {
   try {
-    const rawState = sessionStorage.getItem(WESTERN_PAGE_STATE_KEY);
+    const rawState = sessionStorage.getItem(WESTERN_STREAM_STATE_KEY);
     if (!rawState) return null;
-    const state = JSON.parse(rawState) as WesternPageState;
-    if (!Array.isArray(state.items) || !Number.isInteger(state.page)) {
+    const state = JSON.parse(rawState) as WesternStreamState;
+    if (
+      !Array.isArray(state.items) ||
+      !Number.isInteger(state.nextPage) ||
+      !Number.isInteger(state.lastLoadedPage) ||
+      !Number.isInteger(state.pageCount) ||
+      typeof state.hasMore !== 'boolean'
+    ) {
       return null;
     }
     return state;
   } catch {
     return null;
   }
-}
-
-function getVisiblePages(currentPage: number, totalPages: number) {
-  if (totalPages <= 7) {
-    return Array.from({ length: totalPages }, (_, index) => index + 1);
-  }
-
-  const pages: Array<number | 'ellipsis'> = [1];
-  const start = Math.max(2, currentPage - 2);
-  const end = Math.min(totalPages - 1, currentPage + 2);
-
-  if (start > 2) pages.push('ellipsis');
-  for (let pageNumber = start; pageNumber <= end; pageNumber += 1) {
-    pages.push(pageNumber);
-  }
-  if (end < totalPages - 1) pages.push('ellipsis');
-  pages.push(totalPages);
-
-  return pages;
 }
 
 function getPageScrollTop() {
@@ -63,64 +89,84 @@ function getPageScrollTop() {
 
 export default function WesternPage() {
   const router = useRouter();
-  const searchParams = useSearchParams();
   const { mainContainerRef } = useSite();
-  const queryPage = Number(searchParams.get('page') || '1');
-  const initialPage = Number.isInteger(queryPage) && queryPage > 0 ? queryPage : 1;
-  const [savedState] = useState<WesternPageState | null>(() =>
-    typeof window === 'undefined' ? null : readSavedState()
-  );
-  const restoredState =
-    savedState && savedState.page === initialPage ? savedState : null;
-  const [page, setPage] = useState(initialPage);
-  const [pageCount, setPageCount] = useState(restoredState?.pageCount || 0);
-  const [pageInput, setPageInput] = useState(String(initialPage));
-  const [items, setItems] = useState<SearchResult[]>(restoredState?.items || []);
-  const [loading, setLoading] = useState(!restoredState);
+  const [items, setItems] = useState<SearchResult[]>([]);
+  const [hasMore, setHasMore] = useState(true);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [retryToken, setRetryToken] = useState(0);
-  const skipInitialFetchRef = useRef(Boolean(restoredState));
+  const [lastLoadedPage, setLastLoadedPage] = useState(0);
+  const [pageCount, setPageCount] = useState(0);
 
-  const getScrollContainer = useCallback(() => {
-    if (window.innerWidth < 768) return document.scrollingElement;
-    return mainContainerRef?.current;
-  }, [mainContainerRef]);
+  const itemsRef = useRef<SearchResult[]>([]);
+  const nextPageRef = useRef(1);
+  const lastLoadedPageRef = useRef(0);
+  const pageCountRef = useRef(0);
+  const hasMoreRef = useRef(true);
+  const loadingRef = useRef(false);
+  const generationRef = useRef(0);
+  const loadMoreRef = useRef<() => Promise<void>>(async () => undefined);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const scrollPositionRef = useRef(0);
+  const pendingScrollRestoreRef = useRef<number | null>(null);
+  const scrollSaveTimerRef = useRef<number | null>(null);
 
-  const savePageState = useCallback(() => {
+  const persistState = useCallback(() => {
     try {
       const scrollTop = Math.max(
-        getScrollContainer()?.scrollTop || 0,
-        getPageScrollTop()
+        mainContainerRef?.current?.scrollTop ?? 0,
+        getPageScrollTop(),
+        scrollPositionRef.current
       );
+      scrollPositionRef.current = scrollTop;
       sessionStorage.setItem(
-        WESTERN_PAGE_STATE_KEY,
-        JSON.stringify({ page, pageCount, items, scrollTop } satisfies WesternPageState)
+        WESTERN_STREAM_STATE_KEY,
+        JSON.stringify({
+          items: itemsRef.current,
+          nextPage: nextPageRef.current,
+          lastLoadedPage: lastLoadedPageRef.current,
+          pageCount: pageCountRef.current,
+          hasMore: hasMoreRef.current,
+          scrollTop,
+        } satisfies WesternStreamState)
       );
     } catch {
       // Không để session storage làm gián đoạn việc duyệt phim.
     }
-  }, [getScrollContainer, items, page, pageCount]);
+  }, [mainContainerRef]);
 
-  useEffect(() => {
-    if (skipInitialFetchRef.current) {
-      skipInitialFetchRef.current = false;
-      setLoading(false);
-      return;
-    }
+  const loadMore = useCallback(async () => {
+    if (loadingRef.current || !hasMoreRef.current) return;
 
-    const controller = new AbortController();
+    const generation = generationRef.current;
+    loadingRef.current = true;
     setLoading(true);
     setError('');
-    setItems([]);
 
-    fetch(`/api/western-catalog?limit=20&page=${page}`, {
-      signal: controller.signal,
-    })
-      .then(async (response) => {
+    let nextPage = nextPageRef.current;
+    let nextLastLoadedPage = lastLoadedPageRef.current;
+    let nextPageCount = pageCountRef.current;
+    let nextHasMore: boolean = hasMoreRef.current;
+    const receivedItems: SearchResult[] = [];
+
+    try {
+      // Một trang API có thể toàn stream lỗi hoặc bị trùng tên. Trong trường
+      // hợp đó chỉ bỏ qua tối đa vài trang rồi trả lại quyền điều khiển cho
+      // thao tác cuộn, không tải cả kho một lúc.
+      for (
+        let batch = 0;
+        batch < MAX_EMPTY_BATCHES_PER_LOAD && nextHasMore;
+        batch += 1
+      ) {
+        const controller = new AbortController();
+        const response = await fetch(
+          `/api/western-catalog?limit=20&page=${nextPage}`,
+          { signal: controller.signal }
+        );
         const data = await response.json();
         if (!response.ok) {
-          throw new Error(data.error || 'Không thể tải phim Âu Mỹ');
+          throw new Error(data.error || 'Không thể tải thêm phim Âu Mỹ');
         }
+        if (generation !== generationRef.current) return;
 
         const candidates = Array.isArray(data.items) ? data.items : [];
         const checks = await Promise.all(
@@ -130,84 +176,167 @@ export default function WesternPage() {
               : null
           )
         );
-        if (controller.signal.aborted) return;
+        if (generation !== generationRef.current) return;
 
-        setItems(checks.filter((item): item is SearchResult => item !== null));
-        setPageCount(Number(data.pageCount) || page);
-      })
-      .catch((requestError) => {
-        if (
-          !controller.signal.aborted &&
-          !(requestError instanceof DOMException && requestError.name === 'AbortError')
-        ) {
-          setError(
-            requestError instanceof Error
-              ? requestError.message
-              : 'Không thể tải phim Âu Mỹ'
-          );
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
+        receivedItems.push(
+          ...checks.filter((item): item is SearchResult => item !== null)
+        );
+        nextLastLoadedPage = nextPage;
+        nextPage += 1;
+        nextPageCount = Number(data.pageCount) || nextPageCount || nextPage;
+        nextHasMore = nextPage <= nextPageCount;
 
-    return () => controller.abort();
-  }, [page, retryToken]);
+        if (receivedItems.length > 0 || !nextHasMore) break;
+      }
+
+      if (generation !== generationRef.current) return;
+
+      const nextItems = mergeUniqueItems(itemsRef.current, receivedItems);
+      itemsRef.current = nextItems;
+      nextPageRef.current = nextPage;
+      lastLoadedPageRef.current = nextLastLoadedPage;
+      pageCountRef.current = nextPageCount;
+      hasMoreRef.current = nextHasMore;
+      setItems(nextItems);
+      setLastLoadedPage(nextLastLoadedPage);
+      setPageCount(nextPageCount);
+      setHasMore(nextHasMore);
+      persistState();
+    } catch (requestError) {
+      if (generation === generationRef.current) {
+        setError(
+          requestError instanceof Error
+            ? requestError.message
+            : 'Không thể tải thêm phim Âu Mỹ'
+        );
+      }
+    } finally {
+      if (generation === generationRef.current) {
+        loadingRef.current = false;
+        setLoading(false);
+      }
+    }
+  }, [persistState]);
+
+  loadMoreRef.current = loadMore;
 
   useEffect(() => {
-    setPageInput(String(page));
-  }, [page]);
+    generationRef.current += 1;
+    const savedState = readSavedState();
+
+    if (savedState) {
+      itemsRef.current = mergeUniqueItems([], savedState.items);
+      nextPageRef.current = savedState.nextPage;
+      lastLoadedPageRef.current = savedState.lastLoadedPage;
+      pageCountRef.current = savedState.pageCount;
+      hasMoreRef.current = savedState.hasMore;
+      scrollPositionRef.current = savedState.scrollTop;
+      pendingScrollRestoreRef.current = savedState.scrollTop;
+      setItems(itemsRef.current);
+      setLastLoadedPage(savedState.lastLoadedPage);
+      setPageCount(savedState.pageCount);
+      setHasMore(savedState.hasMore);
+      setLoading(false);
+      setError('');
+      return;
+    }
+
+    itemsRef.current = [];
+    nextPageRef.current = 1;
+    lastLoadedPageRef.current = 0;
+    pageCountRef.current = 0;
+    hasMoreRef.current = true;
+    loadingRef.current = false;
+    scrollPositionRef.current = 0;
+    pendingScrollRestoreRef.current = 0;
+    setItems([]);
+    setLastLoadedPage(0);
+    setPageCount(0);
+    setHasMore(true);
+    setLoading(true);
+    setError('');
+    void loadMore();
+  }, [loadMore]);
 
   useEffect(() => {
-    if (!restoredState || loading || items.length === 0) return;
+    const container = mainContainerRef?.current;
 
-    const restoreScroll = () => {
-      const scrollTop = restoredState.scrollTop;
-      getScrollContainer()?.scrollTo({ top: scrollTop, behavior: 'auto' });
-      window.scrollTo({ top: scrollTop, behavior: 'auto' });
+    const flushScrollPosition = () => {
+      if (scrollSaveTimerRef.current !== null) {
+        window.clearTimeout(scrollSaveTimerRef.current);
+        scrollSaveTimerRef.current = null;
+      }
+      persistState();
     };
-    const frame = window.requestAnimationFrame(restoreScroll);
-    const retryTimer = window.setTimeout(restoreScroll, 180);
+
+    const handleScroll = () => {
+      scrollPositionRef.current = Math.max(
+        container?.scrollTop ?? 0,
+        getPageScrollTop()
+      );
+      if (scrollSaveTimerRef.current !== null) return;
+      scrollSaveTimerRef.current = window.setTimeout(flushScrollPosition, 150);
+    };
+
+    container?.addEventListener('scroll', handleScroll, { passive: true });
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    window.addEventListener('pagehide', flushScrollPosition);
+    return () => {
+      container?.removeEventListener('scroll', handleScroll);
+      window.removeEventListener('scroll', handleScroll);
+      window.removeEventListener('pagehide', flushScrollPosition);
+      flushScrollPosition();
+    };
+  }, [mainContainerRef, persistState]);
+
+  useEffect(() => {
+    const scrollTop = pendingScrollRestoreRef.current;
+    const container = mainContainerRef?.current;
+    if (
+      scrollTop === null ||
+      !container ||
+      loading ||
+      (scrollTop > 0 && items.length === 0)
+    ) {
+      return;
+    }
+
+    const restoreScrollPosition = () => {
+      container.scrollTo({ top: scrollTop, behavior: 'auto' });
+      window.scrollTo({ top: scrollTop, behavior: 'auto' });
+      scrollPositionRef.current = scrollTop;
+    };
+
+    const frame = window.requestAnimationFrame(restoreScrollPosition);
+    const retryTimer = window.setTimeout(restoreScrollPosition, 180);
+    pendingScrollRestoreRef.current = null;
     return () => {
       window.cancelAnimationFrame(frame);
       window.clearTimeout(retryTimer);
     };
-  }, [getScrollContainer, items.length, loading, restoredState]);
+  }, [items.length, loading, mainContainerRef]);
 
   useEffect(() => {
-    window.addEventListener('pagehide', savePageState);
-    return () => {
-      window.removeEventListener('pagehide', savePageState);
-      savePageState();
-    };
-  }, [savePageState]);
+    const target = sentinelRef.current;
+    if (!target || !hasMore) return;
 
-  const goToPage = useCallback(
-    (requestedPage: number) => {
-      if (!Number.isInteger(requestedPage) || pageCount < 1) return;
-      const nextPage = Math.min(Math.max(requestedPage, 1), pageCount);
-      if (nextPage === page) return;
-      savePageState();
-      setPage(nextPage);
-      window.history.replaceState({}, '', `/western?page=${nextPage}`);
-      getScrollContainer()?.scrollTo({ top: 0, behavior: 'smooth' });
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    },
-    [getScrollContainer, page, pageCount, savePageState]
-  );
-
-  const handlePageSubmit = (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const requestedPage = Number(pageInput);
-    if (!pageInput.trim() || !Number.isInteger(requestedPage)) {
-      setPageInput(String(page));
-      return;
-    }
-    goToPage(requestedPage);
-  };
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          void loadMoreRef.current();
+        }
+      },
+      {
+        root: mainContainerRef?.current || null,
+        rootMargin: '700px 0px',
+      }
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [hasMore, loading, mainContainerRef]);
 
   const goBack = () => {
-    savePageState();
+    persistState();
     if (window.history.length > 1) {
       router.back();
     } else {
@@ -215,7 +344,7 @@ export default function WesternPage() {
     }
   };
 
-  const visiblePages = getVisiblePages(page, pageCount);
+  const initialLoading = loading && items.length === 0;
 
   return (
     <PageLayout activePath="/western" title="Phim Âu Mỹ">
@@ -233,7 +362,7 @@ export default function WesternPage() {
             <button
               type="button"
               onClick={() => {
-                savePageState();
+                persistState();
                 router.push('/');
               }}
               className="inline-flex items-center gap-2 rounded-lg bg-blue-500 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-600"
@@ -246,8 +375,8 @@ export default function WesternPage() {
             Phim Âu Mỹ
           </h1>
           <p className="text-sm text-gray-500 dark:text-gray-400">
-            Tổng hợp nguồn JoyFlix và BDZY. Mỗi thẻ chỉ hiện sau khi kiểm tra
-            playlist và đoạn video đầu tiên có thể phát trong trình duyệt.
+            Tải dần khi bạn cuộn. Mỗi thẻ chỉ hiện sau khi kiểm tra playlist và
+            đoạn video đầu tiên có thể phát trong trình duyệt.
           </p>
         </div>
 
@@ -256,7 +385,7 @@ export default function WesternPage() {
             <p>{error}</p>
             <button
               type="button"
-              onClick={() => setRetryToken((value) => value + 1)}
+              onClick={() => void loadMore()}
               className="mt-2 text-sm font-medium underline"
             >
               Thử lại
@@ -264,7 +393,7 @@ export default function WesternPage() {
           </div>
         )}
 
-        {loading && (
+        {initialLoading && (
           <div className="grid grid-cols-3 gap-x-3 gap-y-6 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7">
             {Array.from({ length: 20 }).map((_, index) => (
               <VideoCardSkeleton key={index} showYear />
@@ -272,17 +401,20 @@ export default function WesternPage() {
           </div>
         )}
 
-        {!loading && !error && items.length === 0 && (
+        {!initialLoading && !error && items.length === 0 && (
           <p className="py-12 text-center text-gray-500 dark:text-gray-400">
-            Trang này hiện chưa có phim nào vượt qua kiểm tra phát.
+            Hiện chưa có phim nào vượt qua kiểm tra phát.
           </p>
         )}
 
-        {!loading && items.length > 0 && (
+        {items.length > 0 && (
           <>
             <p className="mb-4 text-sm text-gray-500 dark:text-gray-400">
-              Trang {page} / {pageCount.toLocaleString('vi-VN')} · {items.length}{' '}
-              phim phát được
+              Đã tải {items.length.toLocaleString('vi-VN')} phim phát được
+              {lastLoadedPage > 0 &&
+                ` · đang ở lô ${lastLoadedPage}${
+                  pageCount > 0 ? ` / ${pageCount}` : ''
+                }`}
             </p>
             <div className="grid grid-cols-3 gap-x-3 gap-y-6 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7">
               {items.map((item, index) => (
@@ -296,7 +428,7 @@ export default function WesternPage() {
                   source_name={item.source_name}
                   year={item.year}
                   from="search"
-                  onNavigate={savePageState}
+                  onNavigate={persistState}
                   priority={index < 6}
                 />
               ))}
@@ -304,73 +436,20 @@ export default function WesternPage() {
           </>
         )}
 
-        {!loading && !error && pageCount > 1 && (
-          <nav
-            className="mt-8 flex flex-wrap items-center justify-center gap-2"
-            aria-label="Phân trang Phim Âu Mỹ"
-          >
-            <button
-              type="button"
-              disabled={page === 1}
-              onClick={() => goToPage(page - 1)}
-              className="rounded-lg bg-gray-100 px-4 py-2 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-gray-800"
-            >
-              Trước
-            </button>
-            {visiblePages.map((pageNumber, index) =>
-              pageNumber === 'ellipsis' ? (
-                <span
-                  key={`ellipsis-${index}`}
-                  className="px-1 text-gray-500 dark:text-gray-400"
-                  aria-hidden="true"
-                >
-                  …
-                </span>
-              ) : (
-                <button
-                  key={pageNumber}
-                  type="button"
-                  onClick={() => goToPage(pageNumber)}
-                  aria-current={pageNumber === page ? 'page' : undefined}
-                  className={`min-w-10 rounded-lg px-3 py-2 text-sm transition-colors ${
-                    pageNumber === page
-                      ? 'bg-blue-500 text-white'
-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700'
-                  }`}
-                >
-                  {pageNumber}
-                </button>
-              )
-            )}
-            <form onSubmit={handlePageSubmit} className="flex items-center gap-2">
-              <label htmlFor="western-page" className="sr-only">
-                Nhập số trang
-              </label>
-              <input
-                id="western-page"
-                type="number"
-                min="1"
-                max={pageCount}
-                value={pageInput}
-                onChange={(event) => setPageInput(event.target.value)}
-                className="w-16 rounded-lg border border-gray-300 bg-white px-2 py-2 text-center text-sm dark:border-gray-700 dark:bg-gray-900"
-              />
-              <button
-                type="submit"
-                className="rounded-lg bg-gray-100 px-3 py-2 text-sm hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700"
-              >
-                Đến trang
-              </button>
-            </form>
-            <button
-              type="button"
-              disabled={page >= pageCount}
-              onClick={() => goToPage(page + 1)}
-              className="rounded-lg bg-gray-100 px-4 py-2 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-gray-800"
-            >
-              Sau
-            </button>
-          </nav>
+        <div ref={sentinelRef} className="h-1" aria-hidden="true" />
+
+        {loading && !initialLoading && (
+          <div className="mt-6 grid grid-cols-3 gap-x-3 gap-y-6 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7">
+            {Array.from({ length: 7 }).map((_, index) => (
+              <VideoCardSkeleton key={index} showYear />
+            ))}
+          </div>
+        )}
+
+        {!loading && !error && !hasMore && items.length > 0 && (
+          <p className="py-10 text-center text-sm text-gray-500 dark:text-gray-400">
+            Đã tải hết phim Âu Mỹ hiện có từ các nguồn đang hoạt động.
+          </p>
         )}
       </div>
     </PageLayout>
