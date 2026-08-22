@@ -38,7 +38,8 @@ const PageLayout = ({
     pathname.startsWith("/admin/") && pathname !== "/admin";
   const showTabletSidebar =
     pathname === "/" || pathname === "/douban" || pathname === "/search";
-  const showBackToTop = showTabletSidebar || pathname === "/cantonese";
+  const showBackToTop =
+    showTabletSidebar || pathname === "/cantonese" || pathname === "/western";
 
   const showFloatingHeader =
     pathname === "/" || pathname === "/douban" || pathname === "/search";

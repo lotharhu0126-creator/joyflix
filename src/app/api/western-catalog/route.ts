@@ -41,6 +41,7 @@ interface UpstreamVideo {
 
 interface UpstreamPage {
   list?: UpstreamVideo[];
+  pagecount?: string | number;
 }
 
 interface WesternTarget {
@@ -56,6 +57,7 @@ interface CacheEntry<T> {
 interface WesternCatalog {
   items: SearchResult[];
   sourceCount: number;
+  pageCount: number;
 }
 
 const westernCatalogCache = new Map<string, CacheEntry<WesternCatalog>>();
@@ -272,13 +274,16 @@ function selectDistinctCandidates(candidates: SearchResult[], limit: number) {
   return selected;
 }
 
-async function getBdzyCandidates(target: WesternTarget) {
+async function getBdzyCandidates(target: WesternTarget, catalogPage: number) {
   // Trang mới của BDZY hiện chủ yếu là playlist JPEG không phát được. Vùng
   // HLS đã xác nhận nằm từ trang 22; gọi đồng thời năm trang này để server
   // không phải chờ tuần tự và không chạm giới hạn thời gian của Netlify.
   const pageNumbers = Array.from(
     { length: BDZY_PREVIEW_PAGE_COUNT },
-    (_, index) => BDZY_LEGACY_START_PAGE + index
+    (_, index) =>
+      BDZY_LEGACY_START_PAGE +
+      (catalogPage - 1) * BDZY_PREVIEW_PAGE_COUNT +
+      index
   );
   const pages = await mapWithConcurrency(
     pageNumbers,
@@ -292,7 +297,7 @@ async function getBdzyCandidates(target: WesternTarget) {
     .filter((candidate): candidate is SearchResult => Boolean(candidate));
 }
 
-async function buildWesternCatalog(): Promise<WesternCatalog> {
+async function buildWesternCatalog(page: number): Promise<WesternCatalog> {
   const sites = await getAvailableApiSites();
   const targets = getWesternTargets(sites);
   const regularTargets = targets.filter(
@@ -305,10 +310,10 @@ async function buildWesternCatalog(): Promise<WesternCatalog> {
   const [regularPages, bdzyCandidates] = await Promise.all([
     mapWithConcurrency(
       regularTargets,
-      (target) => fetchSourcePage(target, 1),
+      (target) => fetchSourcePage(target, page),
       FETCH_CONCURRENCY
     ),
-    bdzyTarget ? getBdzyCandidates(bdzyTarget) : Promise.resolve([]),
+    bdzyTarget ? getBdzyCandidates(bdzyTarget, page) : Promise.resolve([]),
   ]);
   const regularGroups = regularPages.map((page, index) =>
     (page?.list || [])
@@ -326,48 +331,64 @@ async function buildWesternCatalog(): Promise<WesternCatalog> {
   return {
     items,
     sourceCount: new Set(items.map((item) => item.source)).size,
+    pageCount: Math.max(
+      page,
+      ...regularPages.map((sourcePage) =>
+        Math.max(0, Number(sourcePage?.pagecount) || 0)
+      )
+    ),
   };
 }
 
-function getWesternCatalog(siteOrigin: string) {
-  const cached = westernCatalogCache.get(siteOrigin);
+function getWesternCatalog(siteOrigin: string, page: number) {
+  const cacheKey = `${siteOrigin}:${page}`;
+  const cached = westernCatalogCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     return Promise.resolve(cached.value);
   }
 
-  const pending = westernCatalogPromises.get(siteOrigin);
+  const pending = westernCatalogPromises.get(cacheKey);
   if (pending) return pending;
 
-  const request = buildWesternCatalog()
+  const request = buildWesternCatalog(page)
     .then((catalog) => {
-      westernCatalogCache.set(siteOrigin, {
+      westernCatalogCache.set(cacheKey, {
         value: catalog,
         expiresAt: Date.now() + CATALOG_CACHE_TTL_MS,
       });
       return catalog;
     })
     .finally(() => {
-      westernCatalogPromises.delete(siteOrigin);
+      westernCatalogPromises.delete(cacheKey);
     });
-  westernCatalogPromises.set(siteOrigin, request);
+  westernCatalogPromises.set(cacheKey, request);
   return request;
 }
 
 export async function GET(request: NextRequest) {
   const limit = Number(request.nextUrl.searchParams.get('limit') || '20');
+  const page = Number(request.nextUrl.searchParams.get('page') || '1');
   if (!Number.isInteger(limit) || limit < 1 || limit > CATALOG_SIZE) {
     return NextResponse.json(
       { error: 'Giới hạn không hợp lệ' },
       { status: 400 }
     );
   }
+  if (!Number.isInteger(page) || page < 1 || page > 500) {
+    return NextResponse.json(
+      { error: 'Số trang không hợp lệ' },
+      { status: 400 }
+    );
+  }
 
   try {
-    const catalog = await getWesternCatalog(request.nextUrl.origin);
+    const catalog = await getWesternCatalog(request.nextUrl.origin, page);
     return NextResponse.json(
       {
         items: catalog.items.slice(0, limit),
         sourceCount: catalog.sourceCount,
+        page,
+        pageCount: catalog.pageCount,
         checkedAt: Date.now(),
       },
       {
