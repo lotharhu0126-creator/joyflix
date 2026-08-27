@@ -7,7 +7,7 @@ import { ArrowLeft, Home } from 'lucide-react';
 import PageLayout from '@/components/PageLayout';
 import { useSite } from '@/components/SiteProvider';
 import VideoCard from '@/components/VideoCard';
-import { getAuthInfoFromBrowserCookie } from '@/lib/auth';
+import { BDZY_ADULT_TYPE_ID } from '@/lib/adult-content';
 import {
   BDZY_CATEGORIES,
   BDZY_CATEGORY_SECTIONS,
@@ -20,6 +20,9 @@ import { SearchResult } from '@/lib/types';
 
 const DEFAULT_CATEGORY = BDZY_CATEGORIES.find((category) => category.id === 6)!;
 const SOURCE_PAGE_STATE_KEY = 'joyflix-bdzy-page-state';
+// BDZY trang 1 của loại 55 hiện toàn playlist ảnh. Đây là lô đầu tiên đã
+// xác nhận còn có HLS video thật, nên mở danh mục sẽ không rơi vào trang rỗng.
+const BDZY_ADULT_FIRST_PLAYABLE_PAGE = 14;
 
 interface SourcePageState {
   categoryId: number;
@@ -63,16 +66,8 @@ export default function SourcePage() {
   const { mainContainerRef } = useSite();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [canViewAdult] = useState(
-    () =>
-      typeof window !== 'undefined' &&
-      Boolean(getAuthInfoFromBrowserCookie()?.username)
-  );
-  const visibleCategories = canViewAdult
-    ? BDZY_CATEGORIES
-    : BDZY_CATEGORIES.filter((category) => category.id !== 55);
   const requestedCategoryId = Number(searchParams.get('category'));
-  const requestedCategory = visibleCategories.find(
+  const requestedCategory = BDZY_CATEGORIES.find(
     (category) => category.id === requestedCategoryId
   );
   const requestedLanguage = searchParams.get('language');
@@ -86,21 +81,26 @@ export default function SourcePage() {
       ? null
       : (() => {
           if (requestedCategory) return null;
-          const state = getSavedPageState();
-          return !canViewAdult && state?.categoryId === 55 ? null : state;
+          return getSavedPageState();
         })()
   );
   const savedCategory =
     requestedCategory ||
-    visibleCategories.find(
+    BDZY_CATEGORIES.find(
       (category) => category.id === savedPageState?.categoryId
     );
+  const initialCategory = savedCategory || DEFAULT_CATEGORY;
+  const initialPage =
+    savedPageState?.page ||
+    (initialCategory.id === BDZY_ADULT_TYPE_ID
+      ? BDZY_ADULT_FIRST_PLAYABLE_PAGE
+      : 1);
   const [selectedCategory, setSelectedCategory] = useState(
-    savedCategory || DEFAULT_CATEGORY
+    initialCategory
   );
   const [hongKongLanguage, setHongKongLanguage] =
     useState<HongKongLanguage | null>(
-      (savedCategory || DEFAULT_CATEGORY).id === HONG_KONG_CATEGORY_ID
+      initialCategory.id === HONG_KONG_CATEGORY_ID
         ? requestedHongKongLanguage ||
             savedPageState?.hongKongLanguage ||
             HONG_KONG_LANGUAGES[0]
@@ -109,10 +109,10 @@ export default function SourcePage() {
   const [items, setItems] = useState<SearchResult[]>(
     savedPageState?.items || []
   );
-  const [page, setPage] = useState(savedPageState?.page || 1);
+  const [page, setPage] = useState(initialPage);
   const [pageCount, setPageCount] = useState(savedPageState?.pageCount || 0);
   const [total, setTotal] = useState(savedPageState?.total || 0);
-  const [pageInput, setPageInput] = useState(String(savedPageState?.page || 1));
+  const [pageInput, setPageInput] = useState(String(initialPage));
   const [loading, setLoading] = useState(!savedPageState);
   const [error, setError] = useState('');
   const restoredOnMountRef = useRef(false);
@@ -222,7 +222,9 @@ export default function SourcePage() {
     setHongKongLanguage(
       category.id === HONG_KONG_CATEGORY_ID ? HONG_KONG_LANGUAGES[0] : null
     );
-    setPage(1);
+    setPage(
+      category.id === BDZY_ADULT_TYPE_ID ? BDZY_ADULT_FIRST_PLAYABLE_PAGE : 1
+    );
   };
 
   const selectHongKongLanguage = (language: HongKongLanguage) => {
@@ -291,9 +293,7 @@ export default function SourcePage() {
         </div>
         <div className="mb-8 grid gap-4 md:grid-cols-2">
           {BDZY_CATEGORY_SECTIONS.map((section) => {
-            const categories = section.categories.filter(
-              (category) => canViewAdult || category.id !== 55
-            );
+            const categories = section.categories;
             if (categories.length === 0) return null;
             return (
               <section

@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-import { isAdultResult } from '@/lib/adult-content';
-import { hasValidAccountSession } from '@/lib/auth';
 import { hasUsableBdzyPlayback } from '@/lib/bdzy-playback';
 import { getAvailableApiSites, getCacheTime } from '@/lib/config';
 import { getDetailFromApi } from '@/lib/downstream';
@@ -69,26 +67,14 @@ export async function GET(request: NextRequest) {
         { status: 422 }
       );
     }
-    if (isAdultResult(result) && !(await hasValidAccountSession(request))) {
-      return NextResponse.json(
-        { error: 'Không tìm thấy nội dung' },
-        { status: 404 }
-      );
-    }
     const cacheTime = await getCacheTime();
 
     return NextResponse.json(result, {
       headers: {
-        'Cache-Control': isAdultResult(result)
-          ? 'private, no-store'
-          : `public, max-age=${cacheTime}, s-maxage=${cacheTime}`,
-        ...(isAdultResult(result)
-          ? {}
-          : {
-              'CDN-Cache-Control': `public, s-maxage=${cacheTime}`,
-              'Vercel-CDN-Cache-Control': `public, s-maxage=${cacheTime}`,
-              'Netlify-Vary': 'query',
-            }),
+        'Cache-Control': `public, max-age=${cacheTime}, s-maxage=${cacheTime}`,
+        'CDN-Cache-Control': `public, s-maxage=${cacheTime}`,
+        'Vercel-CDN-Cache-Control': `public, s-maxage=${cacheTime}`,
+        'Netlify-Vary': 'query',
       },
     });
   } catch (error) {

@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-import { BDZY_ADULT_TYPE_ID } from '@/lib/adult-content';
-import { hasValidAccountSession } from '@/lib/auth';
 import { getUsableBdzyEpisodes } from '@/lib/bdzy-playback';
 import {
   HONG_KONG_CATEGORY_ID,
@@ -230,16 +228,6 @@ export async function GET(request: NextRequest) {
       { status: 400 }
     );
   }
-  if (
-    typeId === BDZY_ADULT_TYPE_ID &&
-    !(await hasValidAccountSession(request))
-  ) {
-    return NextResponse.json(
-      { error: 'Bạn cần đăng nhập để xem danh mục này' },
-      { status: 403 }
-    );
-  }
-
   const bdzy = (await getAvailableApiSites()).find(
     (site) => site.key === BDZY_SOURCE_KEY
   );
@@ -298,10 +286,9 @@ export async function GET(request: NextRequest) {
         total: Number(data.total) || 0,
       },
       {
-        // Cache riêng trong trình duyệt: an toàn với tài khoản/18+ mà vẫn làm
-        // lần quay lại danh mục nhanh hơn, không cần gọi BDZY lần nữa.
         headers: {
-          'Cache-Control': 'private, max-age=300, stale-while-revalidate=1800',
+          'Cache-Control': 'public, max-age=300, s-maxage=600',
+          'Netlify-Vary': 'query',
         },
       }
     );
