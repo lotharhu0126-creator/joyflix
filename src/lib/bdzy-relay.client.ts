@@ -4,6 +4,14 @@ import { cleanHtmlTags } from '@/lib/utils';
 const BDZY_RELAY_URL =
   'https://joyflix-bdzy-relay.joyflix-huge-2026-0820.workers.dev/bdzy';
 const BDZY_IMAGE_SEQUENCE_HOST_SUFFIX = '.bdzybf22.com';
+const EMPTY_PAGE_SCAN_LIMIT = 30;
+const EMPTY_PAGE_SCAN_CONCURRENCY = 5;
+
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw new DOMException('The BDZY request was aborted', 'AbortError');
+  }
+}
 
 interface BdzyVideo {
   vod_id?: string | number;
@@ -124,22 +132,68 @@ export async function fetchBdzyCategory({
   language?: string | null;
   signal?: AbortSignal;
 }) {
-  const query = new URLSearchParams({
-    ac: 'videolist',
-    t: String(typeId),
-    pg: String(page),
-  });
-  if (language) query.set('wd', language);
+  let lastResponse: (BdzyResponse & { list: BdzyVideo[] }) | null = null;
+  let reachedLastPage = false;
 
-  const data = await requestBdzy(query, signal);
+  // BDZY hiện đặt nhiều trang playlist ảnh ở đầu từng danh mục. Chỉ quét một
+  // cửa sổ nhỏ, theo thứ tự, đến khi gặp trang có HLS thật để giao diện không
+  // hiển thị "trống" dù phía nguồn vẫn còn phim phát được.
+  for (
+    let offset = 0;
+    offset < EMPTY_PAGE_SCAN_LIMIT;
+    offset += EMPTY_PAGE_SCAN_CONCURRENCY
+  ) {
+    throwIfAborted(signal);
+    const candidatePages = Array.from(
+      { length: EMPTY_PAGE_SCAN_CONCURRENCY },
+      (_, index) => page + offset + index
+    );
+    const responses = await Promise.allSettled(
+      candidatePages.map((candidatePage) => {
+        const query = new URLSearchParams({
+          ac: 'videolist',
+          t: String(typeId),
+          pg: String(candidatePage),
+        });
+        if (language) query.set('wd', language);
+        return requestBdzy(query, signal);
+      })
+    );
+    throwIfAborted(signal);
+
+    for (let index = 0; index < responses.length; index += 1) {
+      const response = responses[index];
+      if (response.status !== 'fulfilled') continue;
+
+      const data = response.value;
+      lastResponse = data;
+      const items = data.list.flatMap((video) => {
+        const result = toSearchResult(video);
+        return result ? [result] : [];
+      });
+      if (items.length > 0) {
+        return {
+          items,
+          page: Number(data.page) || candidatePages[index],
+          pageCount: Number(data.pagecount) || 0,
+          total: Number(data.total) || 0,
+        };
+      }
+
+      const lastPage = Number(data.pagecount) || 0;
+      if (lastPage > 0 && candidatePages[index] >= lastPage) {
+        reachedLastPage = true;
+        break;
+      }
+    }
+    if (reachedLastPage) break;
+  }
+
   return {
-    items: data.list.flatMap((video) => {
-      const result = toSearchResult(video);
-      return result ? [result] : [];
-    }),
-    page: Number(data.page) || page,
-    pageCount: Number(data.pagecount) || 0,
-    total: Number(data.total) || 0,
+    items: [],
+    page,
+    pageCount: Number(lastResponse?.pagecount) || 0,
+    total: Number(lastResponse?.total) || 0,
   };
 }
 

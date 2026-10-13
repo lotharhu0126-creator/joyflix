@@ -197,6 +197,7 @@ export default function SourcePage() {
         setItems(data.items || []);
         setPageCount(data.pageCount || 0);
         setTotal(data.total || 0);
+        if (data.page !== page) setPage(data.page);
       })
       .catch((requestError) => {
         if (
