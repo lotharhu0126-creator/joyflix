@@ -1,14 +1,31 @@
 const BDZY_API_URL = 'https://api.apibdzy.com/api.php/provide/vod/at/json';
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 10_000;
+const ALLOWED_BROWSER_ORIGINS = new Set(['https://xemfree.netlify.app']);
 
-function jsonResponse(body, status) {
+function getCorsHeaders(request) {
+  const origin = request.headers.get('Origin');
+  const isLocalDevelopment = Boolean(
+    origin && /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/.test(origin)
+  );
+  const isAllowedOrigin = Boolean(
+    origin && (ALLOWED_BROWSER_ORIGINS.has(origin) || isLocalDevelopment)
+  );
+
+  return {
+    Vary: 'Origin',
+    ...(isAllowedOrigin ? { 'Access-Control-Allow-Origin': origin } : {}),
+  };
+}
+
+function jsonResponse(request, body, status) {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
+      ...getCorsHeaders(request),
     },
   });
 }
@@ -58,14 +75,23 @@ export default {
   async fetch(request) {
     const requestUrl = new URL(request.url);
 
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          ...getCorsHeaders(request),
+          'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        },
+      });
+    }
     if (request.method !== 'GET') {
-      return jsonResponse({ error: 'Method not allowed' }, 405);
+      return jsonResponse(request, { error: 'Method not allowed' }, 405);
     }
     if (requestUrl.pathname !== '/bdzy') {
-      return jsonResponse({ error: 'Not found' }, 404);
+      return jsonResponse(request, { error: 'Not found' }, 404);
     }
     if (requestUrl.searchParams.get('ac') !== 'videolist') {
-      return jsonResponse({ error: 'Invalid BDZY action' }, 400);
+      return jsonResponse(request, { error: 'Invalid BDZY action' }, 400);
     }
 
     // Fixed upstream + whitelist query: worker này không thể dùng để proxy URL
@@ -83,7 +109,11 @@ export default {
         requestUrl.searchParams.has('pg') ||
         requestUrl.searchParams.has('wd')
       ) {
-        return jsonResponse({ error: 'Invalid BDZY detail query' }, 400);
+        return jsonResponse(
+          request,
+          { error: 'Invalid BDZY detail query' },
+          400
+        );
       }
       upstreamUrl.searchParams.set('ids', id);
     } else {
@@ -103,7 +133,7 @@ export default {
         (requestedTypeId !== null && !typeId) ||
         (keyword && keyword.length > 100)
       ) {
-        return jsonResponse({ error: 'Invalid BDZY query' }, 400);
+        return jsonResponse(request, { error: 'Invalid BDZY query' }, 400);
       }
       if (typeId) upstreamUrl.searchParams.set('t', typeId);
       upstreamUrl.searchParams.set('pg', page);
@@ -134,6 +164,7 @@ export default {
           statusText: upstreamResponse.statusText,
         });
         return jsonResponse(
+          request,
           { error: 'BDZY upstream rejected the request' },
           502
         );
@@ -141,7 +172,7 @@ export default {
 
       const { body, data } = await readJsonBody(upstreamResponse);
       if (!Array.isArray(data?.list)) {
-        return jsonResponse({ error: 'Invalid BDZY response' }, 502);
+        return jsonResponse(request, { error: 'Invalid BDZY response' }, 502);
       }
 
       return new Response(body, {
@@ -151,11 +182,12 @@ export default {
             ? 'no-store'
             : 'public, max-age=300, s-maxage=300',
           'X-Content-Type-Options': 'nosniff',
+          ...getCorsHeaders(request),
         },
       });
     } catch (error) {
       console.error('BDZY relay failed', error);
-      return jsonResponse({ error: 'BDZY relay request failed' }, 502);
+      return jsonResponse(request, { error: 'BDZY relay request failed' }, 502);
     }
   },
 };

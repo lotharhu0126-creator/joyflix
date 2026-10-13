@@ -18,6 +18,7 @@ import {
   saveSkipConfig,
   subscribeToDataUpdates,
 } from '@/lib/db.client';
+import { fetchBdzyDetail } from '@/lib/bdzy-relay.client';
 import { SearchResult } from '@/lib/types';
 import { getVideoResolutionFromM3u8, processImageUrl } from '@/lib/utils';
 import { filterMarkedHlsAds } from '@/lib/filterMarkedHlsAds';
@@ -1368,6 +1369,12 @@ function PlayPageClient() {
       id: string
     ): Promise<SearchResult[]> => {
       try {
+        if (source === 'bdzy') {
+          const detailData = await fetchBdzyDetail({ id });
+          setAvailableSources([detailData]);
+          return [detailData];
+        }
+
         const detailResponse = await fetch(
           `/api/detail?source=${source}&id=${id}`
         );

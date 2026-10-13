@@ -16,6 +16,7 @@ import {
   HONG_KONG_LANGUAGES,
   HongKongLanguage,
 } from '@/lib/bdzy-categories';
+import { fetchBdzyCategory } from '@/lib/bdzy-relay.client';
 import { SearchResult } from '@/lib/types';
 
 const DEFAULT_CATEGORY = BDZY_CATEGORIES.find((category) => category.id === 6)!;
@@ -182,19 +183,17 @@ export default function SourcePage() {
     const controller = new AbortController();
     setLoading(true);
     setError('');
-    const query = new URLSearchParams({
-      typeId: String(selectedCategory.id),
-      page: String(page),
-    });
-    if (selectedCategory.id === HONG_KONG_CATEGORY_ID && hongKongLanguage) {
-      query.set('language', hongKongLanguage);
-    }
 
-    fetch(`/api/source-categories?${query}`, { signal: controller.signal })
-      .then(async (response) => {
-        const data = await response.json();
-        if (!response.ok)
-          throw new Error(data.error || 'Không thể tải danh mục');
+    fetchBdzyCategory({
+      typeId: selectedCategory.id,
+      page,
+      language:
+        selectedCategory.id === HONG_KONG_CATEGORY_ID
+          ? hongKongLanguage
+          : null,
+      signal: controller.signal,
+    })
+      .then((data) => {
         setItems(data.items || []);
         setPageCount(data.pageCount || 0);
         setTotal(data.total || 0);

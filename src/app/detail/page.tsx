@@ -20,6 +20,7 @@ import {
   subscribeToDataUpdates,
   deleteFavoriteByTitle,
 } from '@/lib/db.client';
+import { fetchBdzyDetail } from '@/lib/bdzy-relay.client';
 import { Favorite, SearchResult } from '@/lib/types';
 import { processImageUrl } from '@/lib/utils';
 import { useIsTablet } from '@/lib/useIsTablet';
@@ -252,14 +253,18 @@ function DetailPageClient() {
         if (!doubanDataFetched && !wmdbDataFetched) {
           // 场景1：我们有source和id。获取完整详情。
           if (source && id) {
-            const detailResponse = await fetch(
-              `/api/detail?source=${source}&id=${id}`
-            );
-            if (!detailResponse.ok) {
-              throw new Error(`获取视频详情失败: ${detailResponse.statusText}`);
+            if (source === 'bdzy') {
+              videoDetailToSet = await fetchBdzyDetail({ id });
+            } else {
+              const detailResponse = await fetch(
+                `/api/detail?source=${source}&id=${id}`
+              );
+              if (!detailResponse.ok) {
+                throw new Error(`获取视频详情失败: ${detailResponse.statusText}`);
+              }
+              const fetchedDetail = await detailResponse.json();
+              videoDetailToSet = fetchedDetail ? { ...fetchedDetail } : null;
             }
-            const fetchedDetail = await detailResponse.json();
-            videoDetailToSet = fetchedDetail ? { ...fetchedDetail } : null;
 
             // 如果提供了初始海报，则保留它
             if (initialPoster && videoDetailToSet) {
